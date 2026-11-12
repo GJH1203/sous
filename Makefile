@@ -11,7 +11,8 @@ go-check:
 	@unformatted="$$(gofmt -l $$(go list -f '{{.Dir}}' ./...))"; \
 	if [ -n "$$unformatted" ]; then echo "gofmt needed (run: make fmt):"; echo "$$unformatted"; exit 1; fi
 	go vet ./...
-	go test -race ./...
+	@# A deadlocked test fails after 60s instead of Go's default 10 minutes.
+	go test -race -timeout 60s ./...
 
 py-check:
 	$(PY) ruff format --check .

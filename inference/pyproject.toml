@@ -1,0 +1,36 @@
+[project]
+name = "inference"
+version = "0.1.0"
+description = "Local inference service: batching, backpressure and model swapping on one GPU."
+requires-python = ">=3.12"
+dependencies = []
+
+[dependency-groups]
+dev = [
+    "pytest>=9.2",
+    "ruff>=0.17",
+]
+
+[build-system]
+requires = ["uv_build>=0.13.7,<0.14"]
+build-backend = "uv_build"
+
+[tool.uv]
+# The repo sits on the Windows drive and uv's cache on the WSL disk;
+# hardlinks cannot cross that boundary, so copy without warning.
+link-mode = "copy"
+
+[tool.ruff]
+line-length = 88
+target-version = "py312"
+
+[tool.ruff.lint]
+# ASYNC flags blocking calls (time.sleep, sync I/O) inside coroutines,
+# the bug that stalls every request sharing the event loop.
+select = ["E", "W", "F", "I", "B", "UP", "ASYNC"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+# Tests that need a real GPU are opt-in: run them with `pytest -m gpu`.
+addopts = ["-q", "--strict-markers", "-m", "not gpu"]
+markers = ["gpu: needs a real GPU and model weights"]

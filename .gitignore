@@ -1,0 +1,46 @@
+# Secrets: only .env.example is tracked.
+.env
+.env.*
+!.env.example
+
+# Model weights and other large artifacts.
+models/
+*.gguf
+*.safetensors
+*.bin
+*.pt
+*.pth
+*.onnx
+
+# Local databases.
+*.db
+*.db-journal
+*.db-shm
+*.db-wal
+*.sqlite
+*.sqlite3
+
+# Go build and profiling output.
+/bin/
+*.exe
+*.test
+*.out
+*.prof
+coverage.*
+
+# Python.
+__pycache__/
+*.py[cod]
+.venv/
+.pytest_cache/
+.ruff_cache/
+*.egg-info/
+build/
+dist/
+
+# Editors and OS.
+.idea/
+.vscode/
+*.swp
+.DS_Store
+Thumbs.db

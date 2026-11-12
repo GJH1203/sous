@@ -1,0 +1,3 @@
+# The repo lives on a Windows drive but is built in WSL; force LF so a
+# checkout from Windows git cannot turn gofmt/ruff checks red with CRLF.
+* text=auto eol=lf

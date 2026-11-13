@@ -2,6 +2,7 @@ package gateway
 
 import (
 	"bytes"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -37,17 +38,36 @@ func NewClient(headerTimeout time.Duration) *http.Client {
 	}
 }
 
-// Proxy forwards every request to one upstream and copies the answer back.
+// Proxy forwards each request to the upstream that serves the model it names,
+// and copies the answer back.
 type Proxy struct {
-	client   *http.Client
-	upstream string // base URL, such as http://127.0.0.1:8083
-	apiKey   string // the gateway's own key for the upstream; empty for none
-	log      *slog.Logger
+	client *http.Client
+	// routes is keyed by logical model name. It is never written after
+	// NewProxy, so concurrent requests can read it without a lock.
+	routes map[string]route
+	log    *slog.Logger
 }
 
-// NewProxy returns a Proxy that sends requests to upstream with client.
-func NewProxy(client *http.Client, upstream, apiKey string, log *slog.Logger) *Proxy {
-	return &Proxy{client: client, upstream: upstream, apiKey: apiKey, log: log}
+// route is where the requests for one logical model go.
+type route struct {
+	baseURL string
+	apiKey  string // the gateway's own key for the upstream; empty for none
+	model   string // the upstream's name for the model
+}
+
+// NewProxy returns a Proxy that routes by cfg, which must have come from
+// LoadConfig: it checks that every model's upstream exists.
+func NewProxy(client *http.Client, cfg *Config, log *slog.Logger) *Proxy {
+	upstreams := make(map[string]Upstream)
+	for _, u := range cfg.Upstreams {
+		upstreams[u.Name] = u
+	}
+	routes := make(map[string]route)
+	for name, m := range cfg.Models {
+		u := upstreams[m.Upstream]
+		routes[name] = route{baseURL: u.BaseURL, apiKey: u.APIKey, model: m.Model}
+	}
+	return &Proxy{client: client, routes: routes, log: log}
 }
 
 func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -63,17 +83,38 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Only "model" is decoded. The other values stay raw JSON, so fields the
+	// gateway knows nothing about reach the upstream with the same meaning.
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(body, &fields); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid_json", "the request body is not a JSON object")
+		return
+	}
+	var model string
+	if err := json.Unmarshal(fields["model"], &model); err != nil || model == "" {
+		writeError(w, http.StatusBadRequest, "missing_model", "the request body has no model string")
+		return
+	}
+	rt, ok := p.routes[model]
+	if !ok {
+		writeError(w, http.StatusNotFound, "model_not_found", fmt.Sprintf("the model %q doesn't exist", model))
+		return
+	}
+	// Marshal cannot fail on a string, nor on raw values that just parsed.
+	fields["model"], _ = json.Marshal(rt.model)
+	body, _ = json.Marshal(fields)
+
 	// The inbound request's context: when the caller goes away, the upstream
 	// request is cancelled with it, and the model stops generating.
-	req, err := http.NewRequestWithContext(r.Context(), r.Method, p.upstream+r.URL.Path, bytes.NewReader(body))
+	req, err := http.NewRequestWithContext(r.Context(), r.Method, rt.baseURL+r.URL.Path, bytes.NewReader(body))
 	if err != nil {
 		p.log.Error("building the upstream request", "err", err)
 		writeError(w, http.StatusInternalServerError, "internal_error", "the gateway could not build the upstream request")
 		return
 	}
 	copyRequestHeader(req.Header, r.Header)
-	if p.apiKey != "" {
-		req.Header.Set("Authorization", "Bearer "+p.apiKey)
+	if rt.apiKey != "" {
+		req.Header.Set("Authorization", "Bearer "+rt.apiKey)
 	}
 
 	resp, err := p.client.Do(req)

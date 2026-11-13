@@ -1,0 +1,26 @@
+# The gateway's config. It holds no secrets: an *_env field names an
+# environment variable, and the gateway reads the key from it at startup.
+listen: 127.0.0.1:8080
+
+# llama-server runs one model per process, so locally each logical model has
+# an upstream of its own.
+upstreams:
+  - name: local-extract
+    base_url: http://127.0.0.1:8081
+  - name: local-chat
+    base_url: http://127.0.0.1:8082
+  - name: local-embed
+    base_url: http://127.0.0.1:8083
+  # A cloud upstream would also name the variable that holds its key:
+  #   api_key_env: CLOUD_API_KEY
+
+# Callers use only these logical names; the gateway swaps in the upstream's
+# own name for the model. llama-server ignores it, a cloud upstream does not.
+models:
+  extract: {upstream: local-extract, model: qwen3.5-4b}
+  chat: {upstream: local-chat, model: qwen3.5-9b}
+  embed: {upstream: local-embed, model: qwen3-embedding-0.6b}
+
+callers:
+  - name: app
+    api_key_env: SOUS_APP_KEY

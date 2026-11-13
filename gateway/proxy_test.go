@@ -60,11 +60,25 @@ func setup(t *testing.T, o options) rig {
 	return rig{fake: fake, fakeURL: upstream.URL, gatewayURL: gw.URL}
 }
 
+// startGateway starts a gateway with one upstream. The upstream knows each
+// model by its logical name, so a reply is the same through the gateway as
+// direct.
 func startGateway(t *testing.T, upstream, apiKey string, headerTimeout time.Duration) (*httptest.Server, *http.Client) {
+	t.Helper()
+	return startGatewayWith(t, &Config{
+		Upstreams: []Upstream{{Name: "fake", BaseURL: upstream, APIKey: apiKey}},
+		Models: map[string]ModelRoute{
+			"chat":  {Upstream: "fake", Model: "chat"},
+			"embed": {Upstream: "fake", Model: "embed"},
+		},
+	}, headerTimeout)
+}
+
+func startGatewayWith(t *testing.T, cfg *Config, headerTimeout time.Duration) (*httptest.Server, *http.Client) {
 	t.Helper()
 	client := NewClient(headerTimeout)
 	logger := slog.New(slog.NewTextHandler(t.Output(), nil))
-	return httptest.NewServer(NewProxy(client, upstream, apiKey, logger)), client
+	return httptest.NewServer(NewProxy(client, cfg, logger)), client
 }
 
 func post(t *testing.T, url string, header http.Header, body string) (*http.Response, []byte) {
@@ -110,7 +124,9 @@ func waitFor(t *testing.T, within time.Duration, what string, cond func() bool) 
 	}
 }
 
-const embedBody = `{"model":"embed","input":["番茄炒蛋","红烧茄子"]}`
+// The keys are in the order the gateway writes them back in, so the upstream
+// gets these exact bytes.
+const embedBody = `{"input":["番茄炒蛋","红烧茄子"],"model":"embed"}`
 
 func TestSameAsDirect(t *testing.T) {
 	r := setup(t, options{})
@@ -218,8 +234,9 @@ func TestUpstreamErrorPassesThrough(t *testing.T) {
 
 func TestBodyLimit(t *testing.T) {
 	r := setup(t, options{})
-	// {"input":"xxx...x"} exactly at the limit, and one byte over it.
-	at := `{"input":"` + strings.Repeat("x", maxBodyBytes-len(`{"input":""}`)) + `"}`
+	// {"input":"xxx...x","model":"embed"} exactly at the limit, and one byte
+	// over it.
+	at := `{"input":"` + strings.Repeat("x", maxBodyBytes-len(`{"input":"","model":"embed"}`)) + `","model":"embed"}`
 	if resp, body := post(t, r.gatewayURL+"/v1/embeddings", nil, at); resp.StatusCode != 200 {
 		t.Errorf("a body of exactly %d bytes: %d %.200s", len(at), resp.StatusCode, body)
 	}

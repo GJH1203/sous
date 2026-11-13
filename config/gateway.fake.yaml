@@ -1,0 +1,20 @@
+# Two fake upstreams in place of the local models, to try the gateway without
+# a GPU:
+#   go run ./cmd/fakeupstream -addr 127.0.0.1:9001 -name fake-a
+#   go run ./cmd/fakeupstream -addr 127.0.0.1:9002 -name fake-b
+listen: 127.0.0.1:8080
+
+upstreams:
+  - name: fake-a
+    base_url: http://127.0.0.1:9001
+  - name: fake-b
+    base_url: http://127.0.0.1:9002
+
+models:
+  extract: {upstream: fake-b, model: fake-extract}
+  chat: {upstream: fake-b, model: fake-chat}
+  embed: {upstream: fake-a, model: fake-embed}
+
+callers:
+  - name: app
+    api_key_env: SOUS_APP_KEY

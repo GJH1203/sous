@@ -87,6 +87,10 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 	copyResponseHeader(w.Header(), resp.Header)
 	w.WriteHeader(resp.StatusCode)
+	if isEventStream(resp.Header) {
+		p.stream(w, r, resp.Body)
+		return
+	}
 	if _, err := io.Copy(w, resp.Body); err != nil {
 		// The status has been sent; all the caller can see is a cut-off body.
 		p.log.Warn("copying the upstream response", "path", r.URL.Path, "err", err)

@@ -2,6 +2,8 @@ package gateway
 
 import (
 	"encoding/json"
+	"fmt"
+	"io"
 	"net/http"
 )
 
@@ -25,4 +27,14 @@ func writeError(w http.ResponseWriter, status int, code, message string) {
 	json.NewEncoder(w).Encode(map[string]apiError{
 		"error": {Message: message, Type: typ, Code: code},
 	})
+}
+
+// writeStreamError ends a stream that broke off with one last event. OpenAI's
+// SDK raises an exception for an event whose data has an "error" key.
+func writeStreamError(w io.Writer, code, message string) {
+	// Marshal cannot fail on strings.
+	data, _ := json.Marshal(map[string]apiError{
+		"error": {Message: message, Type: "server_error", Code: code},
+	})
+	fmt.Fprintf(w, "event: error\ndata: %s\n\n", data)
 }

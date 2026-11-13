@@ -23,6 +23,7 @@ func main() {
 	proxy := gateway.NewProxy(client, *upstream, os.Getenv("SOUS_UPSTREAM_KEY"), logger)
 
 	mux := http.NewServeMux()
+	mux.Handle("POST /v1/chat/completions", proxy)
 	mux.Handle("POST /v1/embeddings", proxy)
 
 	srv := &http.Server{

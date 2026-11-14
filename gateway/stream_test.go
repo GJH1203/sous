@@ -72,8 +72,7 @@ func TestStreamEventsArriveAtOnce(t *testing.T) {
 
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
-	req, _ := http.NewRequestWithContext(ctx, "POST", gw.URL+"/v1/chat/completions", strings.NewReader(chatBody))
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := http.DefaultClient.Do(newRequest(ctx, gw.URL+"/v1/chat/completions", chatBody))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -196,8 +195,7 @@ func startStream(t *testing.T, url string) (hangUp func()) {
 	ctx, cancel := context.WithCancel(context.Background())
 	// Give up on a first event that never comes, instead of hanging the test.
 	timer := time.AfterFunc(2*time.Second, cancel)
-	req, _ := http.NewRequestWithContext(ctx, "POST", url+"/v1/chat/completions", strings.NewReader(chatBody))
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := http.DefaultClient.Do(newRequest(ctx, url+"/v1/chat/completions", chatBody))
 	if err != nil {
 		t.Fatal(err)
 	}

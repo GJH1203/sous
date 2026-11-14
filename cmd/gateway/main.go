@@ -30,13 +30,9 @@ func main() {
 	client := gateway.NewClient(120 * time.Second)
 	proxy := gateway.NewProxy(client, cfg, logger)
 
-	mux := http.NewServeMux()
-	mux.Handle("POST /v1/chat/completions", proxy)
-	mux.Handle("POST /v1/embeddings", proxy)
-
 	srv := &http.Server{
 		Addr:    cfg.Listen,
-		Handler: mux,
+		Handler: gateway.NewHandler(cfg, proxy, logger),
 		// Limits how long a client may take to send its headers. There is no
 		// WriteTimeout: it would cut long streams off.
 		ReadHeaderTimeout: 10 * time.Second,

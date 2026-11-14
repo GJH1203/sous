@@ -50,9 +50,10 @@ type Proxy struct {
 
 // route is where the requests for one logical model go.
 type route struct {
-	baseURL string
-	apiKey  string // the gateway's own key for the upstream; empty for none
-	model   string // the upstream's name for the model
+	upstream string // the upstream's name, for the log
+	baseURL  string
+	apiKey   string // the gateway's own key for the upstream; empty for none
+	model    string // the upstream's name for the model
 }
 
 // NewProxy returns a Proxy that routes by cfg, which must have come from
@@ -65,7 +66,7 @@ func NewProxy(client *http.Client, cfg *Config, log *slog.Logger) *Proxy {
 	routes := make(map[string]route)
 	for name, m := range cfg.Models {
 		u := upstreams[m.Upstream]
-		routes[name] = route{baseURL: u.BaseURL, apiKey: u.APIKey, model: m.Model}
+		routes[name] = route{upstream: u.Name, baseURL: u.BaseURL, apiKey: u.APIKey, model: m.Model}
 	}
 	return &Proxy{client: client, routes: routes, log: log}
 }
@@ -95,11 +96,14 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "missing_model", "the request body has no model string")
 		return
 	}
+	info := infoFrom(r.Context())
+	info.model = model
 	rt, ok := p.routes[model]
 	if !ok {
 		writeError(w, http.StatusNotFound, "model_not_found", fmt.Sprintf("the model %q doesn't exist", model))
 		return
 	}
+	info.upstream = rt.upstream
 	// Marshal cannot fail on a string, nor on raw values that just parsed.
 	fields["model"], _ = json.Marshal(rt.model)
 	body, _ = json.Marshal(fields)
@@ -108,13 +112,18 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// request is cancelled with it, and the model stops generating.
 	req, err := http.NewRequestWithContext(r.Context(), r.Method, rt.baseURL+r.URL.Path, bytes.NewReader(body))
 	if err != nil {
-		p.log.Error("building the upstream request", "err", err)
+		p.log.Error("building the upstream request", "request_id", requestIDFrom(r.Context()), "err", err)
 		writeError(w, http.StatusInternalServerError, "internal_error", "the gateway could not build the upstream request")
 		return
 	}
 	copyRequestHeader(req.Header, r.Header)
 	if rt.apiKey != "" {
 		req.Header.Set("Authorization", "Bearer "+rt.apiKey)
+	}
+	id := requestIDFrom(r.Context())
+	if id != "" {
+		// So that the upstream's log lines can be matched with the gateway's.
+		req.Header.Set("X-Request-ID", id)
 	}
 
 	resp, err := p.client.Do(req)
@@ -127,14 +136,19 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	defer resp.Body.Close()
 
 	copyResponseHeader(w.Header(), resp.Header)
+	if id != "" {
+		// An upstream may send an ID of its own; the caller gets only ours.
+		w.Header().Set("X-Request-ID", id)
+	}
 	w.WriteHeader(resp.StatusCode)
 	if isEventStream(resp.Header) {
+		info.stream = true
 		p.stream(w, r, resp.Body)
 		return
 	}
 	if _, err := io.Copy(w, resp.Body); err != nil {
 		// The status has been sent; all the caller can see is a cut-off body.
-		p.log.Warn("copying the upstream response", "path", r.URL.Path, "err", err)
+		p.log.Warn("copying the upstream response", "request_id", requestIDFrom(r.Context()), "err", err)
 	}
 }
 
@@ -145,7 +159,7 @@ func (p *Proxy) fail(w http.ResponseWriter, r *http.Request, err error) {
 	}
 	// The error contains the upstream's address, so it goes to the log, not
 	// to the caller.
-	p.log.Warn("upstream request failed", "path", r.URL.Path, "err", err)
+	p.log.Warn("upstream request failed", "request_id", requestIDFrom(r.Context()), "err", err)
 	var netErr net.Error
 	if errors.As(err, &netErr) && netErr.Timeout() {
 		writeError(w, http.StatusGatewayTimeout, "upstream_timeout", "the upstream did not answer in time")

@@ -29,14 +29,14 @@ func (p *Proxy) stream(w http.ResponseWriter, r *http.Request, body io.Reader) {
 		// Without a flush, events wait in the server's write buffer and reach
 		// the caller a few kilobytes at a time.
 		if err := rc.Flush(); err != nil {
-			p.log.Warn("flushing the stream", "path", r.URL.Path, "err", err)
+			p.log.Warn("flushing the stream", "request_id", requestIDFrom(r.Context()), "err", err)
 			return
 		}
 	}
 	if err := events.Err(); err != nil && r.Context().Err() == nil {
 		// The status went out before the first event, so it cannot report
 		// this failure any more. An error event is all that is left.
-		p.log.Warn("upstream stream broke off", "path", r.URL.Path, "err", err)
+		p.log.Warn("upstream stream broke off", "request_id", requestIDFrom(r.Context()), "err", err)
 		writeStreamError(w, "upstream_error", "the upstream stream ended early")
 		rc.Flush()
 	}

@@ -23,6 +23,7 @@ type rig struct {
 	fake       *fakeupstream.Server
 	fakeURL    string
 	gatewayURL string
+	logs       *lockedBuffer // the gateway's JSON log
 }
 
 type options struct {
@@ -50,44 +51,71 @@ func setup(t *testing.T, o options) rig {
 	if o.headerTimeout == 0 {
 		o.headerTimeout = 5 * time.Second
 	}
-	gw, client := startGateway(t, upstream.URL, o.apiKey, o.headerTimeout)
+	gw, client, logs := startGatewayLogged(t, oneUpstream(upstream.URL, o.apiKey), o.headerTimeout)
 	t.Cleanup(func() {
 		fake.Close() // first: both servers' Close wait for requests it holds
 		gw.Close()
 		upstream.Close()
 		client.CloseIdleConnections()
 	})
-	return rig{fake: fake, fakeURL: upstream.URL, gatewayURL: gw.URL}
+	return rig{fake: fake, fakeURL: upstream.URL, gatewayURL: gw.URL, logs: logs}
 }
 
-// startGateway starts a gateway with one upstream. The upstream knows each
+// oneUpstream is a config with a single upstream. The upstream knows each
 // model by its logical name, so a reply is the same through the gateway as
 // direct.
-func startGateway(t *testing.T, upstream, apiKey string, headerTimeout time.Duration) (*httptest.Server, *http.Client) {
-	t.Helper()
-	return startGatewayWith(t, &Config{
+func oneUpstream(upstream, apiKey string) *Config {
+	return &Config{
 		Upstreams: []Upstream{{Name: "fake", BaseURL: upstream, APIKey: apiKey}},
 		Models: map[string]ModelRoute{
 			"chat":  {Upstream: "fake", Model: "chat"},
 			"embed": {Upstream: "fake", Model: "embed"},
 		},
-	}, headerTimeout)
+	}
+}
+
+func startGateway(t *testing.T, upstream, apiKey string, headerTimeout time.Duration) (*httptest.Server, *http.Client) {
+	t.Helper()
+	return startGatewayWith(t, oneUpstream(upstream, apiKey), headerTimeout)
 }
 
 func startGatewayWith(t *testing.T, cfg *Config, headerTimeout time.Duration) (*httptest.Server, *http.Client) {
 	t.Helper()
-	client := NewClient(headerTimeout)
-	logger := slog.New(slog.NewTextHandler(t.Output(), nil))
-	return httptest.NewServer(NewProxy(client, cfg, logger)), client
+	gw, client, _ := startGatewayLogged(t, cfg, headerTimeout)
+	return gw, client
 }
 
-func post(t *testing.T, url string, header http.Header, body string) (*http.Response, []byte) {
+// testKey is the key of the one caller that the test gateways let in.
+const testKey = "test-caller-key"
+
+// startGatewayLogged starts the whole gateway, middleware included, with
+// cfg's callers replaced by the test caller. Its JSON log goes to the test's
+// output, and to the buffer it returns.
+func startGatewayLogged(t *testing.T, cfg *Config, headerTimeout time.Duration) (*httptest.Server, *http.Client, *lockedBuffer) {
 	t.Helper()
-	req, err := http.NewRequest("POST", url, strings.NewReader(body))
+	cfg.Callers = []Caller{{Name: "test", APIKey: testKey}}
+	client := NewClient(headerTimeout)
+	logs := &lockedBuffer{}
+	logger := slog.New(slog.NewJSONHandler(io.MultiWriter(t.Output(), logs), nil))
+	return httptest.NewServer(NewHandler(cfg, NewProxy(client, cfg, logger), logger)), client, logs
+}
+
+// newRequest is a JSON POST with the test caller's key.
+func newRequest(ctx context.Context, url, body string) *http.Request {
+	req, err := http.NewRequestWithContext(ctx, "POST", url, strings.NewReader(body))
 	if err != nil {
-		t.Fatal(err)
+		panic(err)
 	}
 	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer "+testKey)
+	return req
+}
+
+// post sends a request built by newRequest, with header's values in place of
+// its own.
+func post(t *testing.T, url string, header http.Header, body string) (*http.Response, []byte) {
+	t.Helper()
+	req := newRequest(context.Background(), url, body)
 	for name, values := range header {
 		req.Header[name] = values
 	}
@@ -155,7 +183,7 @@ func TestCallerKeyIsReplaced(t *testing.T) {
 	for _, tt := range tests {
 		r := setup(t, options{apiKey: tt.apiKey})
 		post(t, r.gatewayURL+"/v1/embeddings", http.Header{
-			"Authorization": {"Bearer caller-key"},
+			"Authorization": {"Bearer " + testKey},
 			"Cookie":        {"session=caller-key"},
 			"X-Anything":    {"caller-key"},
 		}, embedBody)
@@ -283,7 +311,7 @@ func TestCallerLeavingCancelsUpstream(t *testing.T) {
 	r := setup(t, options{fake: func(c *fakeupstream.Config) { c.Delay = 5 * time.Second }})
 	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
 	defer cancel()
-	req, _ := http.NewRequestWithContext(ctx, "POST", r.gatewayURL+"/v1/embeddings", strings.NewReader(embedBody))
+	req := newRequest(ctx, r.gatewayURL+"/v1/embeddings", embedBody)
 	if _, err := http.DefaultClient.Do(req); !errors.Is(err, context.DeadlineExceeded) {
 		t.Fatalf("err = %v, want the caller's deadline", err)
 	}
@@ -307,7 +335,7 @@ func TestConnectionsAreReused(t *testing.T) {
 		var wg sync.WaitGroup
 		for range 8 {
 			wg.Go(func() {
-				resp, err := http.Post(r.gatewayURL+"/v1/embeddings", "application/json", strings.NewReader(embedBody))
+				resp, err := http.DefaultClient.Do(newRequest(context.Background(), r.gatewayURL+"/v1/embeddings", embedBody))
 				if err != nil {
 					t.Error(err)
 					return

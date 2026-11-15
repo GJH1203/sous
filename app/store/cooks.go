@@ -3,6 +3,7 @@ package store
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"time"
 )
 
@@ -73,13 +74,18 @@ func (s *Store) SaveCook(ctx context.Context, c Cook, at time.Time) (int, error)
 	return times, nil
 }
 
-// ingredientID returns the ingredient called name, adding it if it is new.
+// ingredientID returns the ingredient that name stands for: the one it is
+// an alias of, or else the one called name, which is added if it is new.
 func ingredientID(ctx context.Context, tx *sql.Tx, name string) (int64, error) {
+	var id int64
+	err := tx.QueryRowContext(ctx, `SELECT ingredient_id FROM ingredient_aliases WHERE alias = ?`, name).Scan(&id)
+	if !errors.Is(err, sql.ErrNoRows) {
+		return id, err // an alias, or a failure
+	}
 	if _, err := tx.ExecContext(ctx,
 		`INSERT INTO ingredients (name) VALUES (?) ON CONFLICT (name) DO NOTHING`, name); err != nil {
 		return 0, err
 	}
-	var id int64
-	err := tx.QueryRowContext(ctx, `SELECT id FROM ingredients WHERE name = ?`, name).Scan(&id)
+	err = tx.QueryRowContext(ctx, `SELECT id FROM ingredients WHERE name = ?`, name).Scan(&id)
 	return id, err
 }

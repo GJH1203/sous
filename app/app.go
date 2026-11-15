@@ -48,10 +48,24 @@ type user struct {
 	draft *draft // nil when nothing waits for "对"
 }
 
-const help = "发「记 今天做了番茄炒蛋，8 分」记一道菜。"
+const help = "我能做这些：\n" +
+	"记 今天做了番茄炒蛋，8 分：记一道菜，你确认了再存\n" +
+	"想吃 豆腐：列出做过的带豆腐的菜\n" +
+	"别名 西红柿 = 番茄：以后西红柿就算番茄"
 
-// Handle answers one message.
+// Handle answers one message. The command is the first word, so telling
+// the commands apart takes no model.
 func (a *App) Handle(ctx context.Context, m bot.Message) string {
+	text := strings.TrimSpace(m.Content)
+	// These do not touch the draft, so they need not wait for the person's
+	// turn.
+	if rest, ok := command(text, "想吃", false); ok {
+		return a.want(ctx, rest, a.now().In(a.loc))
+	}
+	if rest, ok := command(text, "别名", false); ok {
+		return a.alias(ctx, rest)
+	}
+
 	u, err := a.take(ctx, m.AuthorID)
 	if err != nil {
 		return "" // the bot is shutting down
@@ -63,8 +77,7 @@ func (a *App) Handle(ctx context.Context, m bot.Message) string {
 	if expired {
 		u.draft = nil
 	}
-	text := strings.TrimSpace(m.Content)
-	if rest, ok := command(text, "记"); ok {
+	if rest, ok := command(text, "记", true); ok {
 		return a.record(ctx, u, rest, now)
 	}
 	return a.answer(ctx, u, text, now, expired)
@@ -89,20 +102,22 @@ func (a *App) take(ctx context.Context, id string) (*user, error) {
 	}
 }
 
-// command reports whether text is the command word followed by a space or
-// a colon, or by nothing, and returns the rest. "记 番茄炒蛋" and
-// "记：番茄炒蛋" are the command 记; "记得买菜" is not.
-func command(text, word string) (string, bool) {
+// command reports whether text starts with the command word, and returns
+// the rest, without the space or colon after the word. With spaced, the
+// word must be followed by one of those, or by nothing: "记 番茄炒蛋" and
+// "记：番茄炒蛋" are the command 记, but "记得买菜" is not. Words that no
+// sentence starts with can do without: "想吃豆腐" is how people type it.
+func command(text, word string, spaced bool) (string, bool) {
 	rest, ok := strings.CutPrefix(text, word)
 	if !ok {
 		return "", false
 	}
-	if rest == "" {
-		return "", true
-	}
 	r, size := utf8.DecodeRuneInString(rest)
-	if !unicode.IsSpace(r) && r != ':' && r != '：' {
+	switch {
+	case unicode.IsSpace(r) || r == ':' || r == '：':
+		rest = rest[size:]
+	case spaced && rest != "":
 		return "", false
 	}
-	return strings.TrimSpace(rest[size:]), true
+	return strings.TrimSpace(rest), true
 }

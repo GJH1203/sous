@@ -376,23 +376,30 @@ func TestHelp(t *testing.T) {
 
 func TestCommand(t *testing.T) {
 	tests := []struct {
-		text, rest string
+		text, word string
+		spaced     bool
+		rest       string
 		ok         bool
 	}{
-		{"记 番茄炒蛋", "番茄炒蛋", true},
-		{"记  番茄炒蛋 ", "番茄炒蛋", true},
-		{"记：番茄炒蛋", "番茄炒蛋", true},
-		{"记:番茄炒蛋", "番茄炒蛋", true},
-		{"记\u3000番茄炒蛋", "番茄炒蛋", true}, // a full-width space
-		{"记\n番茄炒蛋", "番茄炒蛋", true},
-		{"记", "", true},
-		{"记得买菜", "", false},
-		{"番茄炒蛋", "", false},
-		{" 记 番茄炒蛋", "", false}, // Handle trims first
+		{"想吃 豆腐", "想吃", false, "豆腐", true},
+		{"想吃豆腐", "想吃", false, "豆腐", true},
+		{"想吃：豆腐", "想吃", false, "豆腐", true},
+		{"想吃", "想吃", false, "", true},
+		{"不想吃豆腐", "想吃", false, "", false},
+		{"记 番茄炒蛋", "记", true, "番茄炒蛋", true},
+		{"记  番茄炒蛋 ", "记", true, "番茄炒蛋", true},
+		{"记：番茄炒蛋", "记", true, "番茄炒蛋", true},
+		{"记:番茄炒蛋", "记", true, "番茄炒蛋", true},
+		{"记\u3000番茄炒蛋", "记", true, "番茄炒蛋", true}, // a full-width space
+		{"记\n番茄炒蛋", "记", true, "番茄炒蛋", true},
+		{"记", "记", true, "", true},
+		{"记得买菜", "记", true, "", false},
+		{"番茄炒蛋", "记", true, "", false},
+		{" 记 番茄炒蛋", "记", true, "", false}, // Handle trims first
 	}
 	for _, tt := range tests {
-		if rest, ok := command(tt.text, "记"); rest != tt.rest || ok != tt.ok {
-			t.Errorf("command(%q) = %q, %v; want %q, %v", tt.text, rest, ok, tt.rest, tt.ok)
+		if rest, ok := command(tt.text, tt.word, tt.spaced); rest != tt.rest || ok != tt.ok {
+			t.Errorf("command(%q, %q, %v) = %q, %v; want %q, %v", tt.text, tt.word, tt.spaced, rest, ok, tt.rest, tt.ok)
 		}
 	}
 }

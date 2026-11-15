@@ -12,23 +12,28 @@ import (
 	"github.com/GJH1203/sous/app/llm"
 )
 
-// TestRealModel runs Extract against a real model, and is skipped unless
+// The tests here run against a real model, and are skipped unless
 // SOUS_EXTRACT_URL is set: to the gateway's address, with SOUS_APP_KEY set
 // too, or to a model server's own. With the gateway on its real config:
 //
-//	SOUS_EXTRACT_URL=http://127.0.0.1:8080 go test ./app/extract -run RealModel -v
-func TestRealModel(t *testing.T) {
+//	SOUS_EXTRACT_URL=http://127.0.0.1:8080 go test ./app/extract -run Real -v
+
+// realModel returns a client for the real model, and a Saturday evening.
+func realModel(t *testing.T) (*llm.Client, time.Time) {
+	t.Helper()
 	url := os.Getenv("SOUS_EXTRACT_URL")
 	if url == "" {
 		t.Skip("SOUS_EXTRACT_URL is not set")
 	}
-	client := llm.New(url, os.Getenv("SOUS_APP_KEY"))
 	loc, err := time.LoadLocation("America/Chicago")
 	if err != nil {
 		t.Fatal(err)
 	}
-	now := time.Date(2026, 11, 14, 20, 30, 0, 0, loc) // a Saturday
+	return llm.New(url, os.Getenv("SOUS_APP_KEY")), time.Date(2026, 11, 14, 20, 30, 0, 0, loc)
+}
 
+func TestRealModel(t *testing.T) {
+	client, now := realModel(t)
 	none := (*float64)(nil)
 	tests := []struct {
 		text   string
@@ -72,5 +77,46 @@ func TestRealModel(t *testing.T) {
 	// Not about cooking at all: no record, rather than a made-up one.
 	if r, err := Extract(context.Background(), client, "今天天气不错", now); !errors.Is(err, ErrNotUnderstood) {
 		t.Errorf("今天天气不错 -> %+v, %v", r, err)
+	}
+}
+
+func TestRealRevise(t *testing.T) {
+	client, now := realModel(t)
+	tests := []struct {
+		text, fix string
+		ok        func(Record) bool // the correction is in, and nothing else changed
+	}{
+		{"番茄炒蛋 7 分", "还放了木耳", func(r Record) bool {
+			return slices.Contains(r.Ingredients, "木耳") && slices.Contains(r.Ingredients, "鸡蛋") && r.Rating != nil && *r.Rating == 7
+		}},
+		{"番茄炒蛋 7 分", "评分改成 8 分", func(r Record) bool {
+			return r.Rating != nil && *r.Rating == 8 && r.Dish == "番茄炒蛋" && r.Date == "2026-11-14"
+		}},
+		{"番茄炒蛋 7 分", "是昨天做的", func(r Record) bool {
+			return r.Date == "2026-11-13" && r.Rating != nil && *r.Rating == 7
+		}},
+		{"今天做了鱼香茄子，9 分", "备注：糖放少了", func(r Record) bool {
+			return r.Note != "" && r.Rating != nil && *r.Rating == 9 && r.Dish == "鱼香茄子"
+		}},
+		{"今天做了鱼香茄子，9 分", "其实没打分", func(r Record) bool {
+			return r.Rating == nil && r.Dish == "鱼香茄子"
+		}},
+		{"今天做了鱼香茄子，9 分", "菜名是鱼香肉丝", func(r Record) bool {
+			return r.Dish == "鱼香肉丝" && r.Rating != nil && *r.Rating == 9
+		}},
+	}
+	for _, tt := range tests {
+		first, err := Extract(context.Background(), client, tt.text, now)
+		if err != nil {
+			t.Errorf("%s: %v", tt.text, err)
+			continue
+		}
+		start := time.Now()
+		r, err := Revise(context.Background(), client, tt.text, first, tt.fix, now)
+		b, _ := json.Marshal(r)
+		t.Logf("%s + %s -> %s %v (%.2fs)", tt.text, tt.fix, b, err, time.Since(start).Seconds())
+		if err != nil || !tt.ok(r) {
+			t.Errorf("%s + %s: %+v, %v", tt.text, tt.fix, r, err)
+		}
 	}
 }

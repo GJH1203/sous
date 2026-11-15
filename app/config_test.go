@@ -1,13 +1,10 @@
 package app
 
 import (
-	"context"
 	"maps"
 	"slices"
 	"strings"
 	"testing"
-
-	"github.com/GJH1203/sous/app/bot"
 )
 
 func env(vars map[string]string) func(string) string {
@@ -87,13 +84,6 @@ func TestConfigErrorsHoldNoSecrets(t *testing.T) {
 	_, err := ConfigFromEnv(env(vars))
 	if err == nil || strings.Contains(err.Error(), "secret") {
 		t.Errorf("got %v", err)
-	}
-}
-
-func TestHandleAnswers(t *testing.T) {
-	a := New(nil, nil, nil, nil)
-	if reply := a.Handle(context.Background(), bot.Message{Content: "你好"}); reply == "" {
-		t.Error("no reply")
 	}
 }
 

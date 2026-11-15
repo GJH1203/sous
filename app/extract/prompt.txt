@@ -21,6 +21,11 @@ The object has exactly these fields:
   before today and "前天" the day before that. For a weekday such as "周三",
   use the latest such day that is not after today.
 
+After your reply, a message starting with "Correction:" may follow, such as
+"Correction: 食材还有肉末" or "Correction: 评分改成 8". Apply it to the object
+you gave, keep every other field as it was, and reply with the whole object
+again.
+
 Examples:
 
 Today: 2026-03-04, Wednesday

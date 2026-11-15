@@ -50,10 +50,41 @@ var temperature = 0.0
 // Extract reads a record out of text, a message sent at now. now must be in
 // the app's time zone: "today" and "yesterday" are days there.
 func Extract(ctx context.Context, chat Chatter, text string, now time.Time) (Record, error) {
-	msgs := []llm.Message{
+	return ask(ctx, chat, start(text, now), now)
+}
+
+// correction starts the message that carries a correction. The prompt
+// explains it.
+const correction = "Correction:"
+
+// Revise applies a correction, such as "食材还有肉末", to r, the record that
+// came out of text at now. The model gets the exchange as if it had gone
+// that way: the message, r as its own reply, then the correction. So it
+// edits the record it can see, rather than reading the message afresh.
+func Revise(ctx context.Context, chat Chatter, text string, r Record, fix string, now time.Time) (Record, error) {
+	given, err := json.Marshal(r)
+	if err != nil {
+		return Record{}, err
+	}
+	msgs := append(start(text, now),
+		llm.Message{Role: "assistant", Content: string(given)},
+		llm.Message{Role: "user", Content: correction + " " + fix},
+	)
+	return ask(ctx, chat, msgs, now)
+}
+
+// start is how every exchange begins: the instructions, then the message
+// with the day it was sent.
+func start(text string, now time.Time) []llm.Message {
+	return []llm.Message{
 		{Role: "system", Content: prompt},
 		{Role: "user", Content: fmt.Sprintf("Today: %s, %s\nMessage: %s", now.Format(time.DateOnly), now.Weekday(), text)},
 	}
+}
+
+// ask sends msgs to the model and checks its reply, and gives it one more
+// try with what was wrong.
+func ask(ctx context.Context, chat Chatter, msgs []llm.Message, now time.Time) (Record, error) {
 	var problems error
 	for range attempts {
 		reply, err := chat.Chat(ctx, "record", llm.ChatRequest{Model: llm.Extract, Messages: msgs, Temperature: &temperature})

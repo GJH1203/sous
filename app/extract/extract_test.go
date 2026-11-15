@@ -2,6 +2,7 @@ package extract
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"net/http/httptest"
 	"reflect"
@@ -206,5 +207,56 @@ func TestBrokenJSONFromTheUpstream(t *testing.T) {
 	}
 	if n := fake.Stats().Requests; n != attempts {
 		t.Errorf("%d requests, want %d", n, attempts)
+	}
+}
+
+// A correction comes after the record, as the next turn, so the model edits
+// the record it gave.
+func TestRevise(t *testing.T) {
+	revised := `{"dish": "鱼香茄子", "ingredients": ["茄子", "猪肉末", "木耳"], "rating": 9, "note": "少放了糖", "date": "2026-11-14"}`
+	s := &script{replies: []string{revised}}
+	r, err := Revise(context.Background(), s, "今天做了鱼香茄子，少放了糖，9 分", goodRecord, "还放了木耳", now)
+	want := goodRecord
+	want.Ingredients = []string{"茄子", "猪肉末", "木耳"}
+	if err != nil || !reflect.DeepEqual(r, want) {
+		t.Fatalf("got %+v, %v", r, err)
+	}
+	if len(s.got) != 1 || s.feature != "record" || s.got[0].Model != llm.Extract || *s.got[0].Temperature != 0 {
+		t.Fatalf("%d requests, feature %q, %+v", len(s.got), s.feature, s.got[0])
+	}
+	msgs := s.got[0].Messages
+	if len(msgs) != 4 || msgs[0].Content != prompt ||
+		msgs[1].Content != "Today: 2026-11-14, Saturday\nMessage: 今天做了鱼香茄子，少放了糖，9 分" {
+		t.Fatalf("messages %+v", msgs)
+	}
+	var given Record
+	if err := json.Unmarshal([]byte(msgs[2].Content), &given); err != nil || msgs[2].Role != "assistant" || !reflect.DeepEqual(given, goodRecord) {
+		t.Errorf("the record as the model's turn: %+v (%v)", msgs[2], err)
+	}
+	if msgs[3] != (llm.Message{Role: "user", Content: "Correction: 还放了木耳"}) {
+		t.Errorf("the correction: %+v", msgs[3])
+	}
+}
+
+// A revised record is checked like any reply, against the day the message
+// was sent, and gets one more try.
+func TestReviseRetries(t *testing.T) {
+	tomorrow := strings.Replace(good, "2026-11-14", "2026-11-15", 1)
+	s := &script{replies: []string{tomorrow, good}}
+	r, err := Revise(context.Background(), s, "今天做了鱼香茄子，少放了糖，9 分", goodRecord, "是明天做的", now)
+	if err != nil || !reflect.DeepEqual(r, goodRecord) {
+		t.Fatalf("got %+v, %v", r, err)
+	}
+	second := s.got[1].Messages
+	if len(s.got) != 2 || len(second) != 6 || second[4].Content != tomorrow ||
+		!strings.Contains(second[5].Content, "date 2026-11-15 is after today, 2026-11-14") {
+		t.Fatalf("second request: %+v", second)
+	}
+}
+
+// The prompt tells the model what a correction looks like.
+func TestPromptExplainsCorrections(t *testing.T) {
+	if !strings.Contains(prompt, `"`+correction) {
+		t.Errorf("the prompt does not mention %q", correction)
 	}
 }

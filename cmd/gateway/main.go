@@ -2,11 +2,14 @@
 package main
 
 import (
+	"context"
 	"flag"
 	"fmt"
 	"log/slog"
-	"net/http"
+	"net"
 	"os"
+	"os/signal"
+	"syscall"
 	"time"
 
 	"github.com/GJH1203/sous/gateway"
@@ -29,20 +32,31 @@ func main() {
 	// generated, so this is really a limit on generation time.
 	client := gateway.NewClient(120 * time.Second)
 	proxy := gateway.NewProxy(client, cfg, logger)
+	srv := gateway.NewServer(cfg, gateway.NewHandler(cfg, proxy, logger), logger)
 
-	srv := &http.Server{
-		Addr:    cfg.Listen,
-		Handler: gateway.NewHandler(cfg, proxy, logger),
-		// Limits how long a client may take to send its headers. There is no
-		// WriteTimeout: it would cut long streams off.
-		ReadHeaderTimeout: 10 * time.Second,
+	// Ctrl+C sends SIGINT; systemd and Docker send SIGTERM. Either one starts
+	// a graceful shutdown.
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+	// stop gives the signals back their default, so a second one ends the
+	// process at once instead of waiting out the grace period.
+	context.AfterFunc(ctx, stop)
+
+	// Listening here rather than in Serve: a port that is taken fails like a
+	// bad config, and "listening" is logged only once it is true.
+	ln, err := net.Listen("tcp", cfg.Listen)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "gateway: %v\n", err)
+		os.Exit(1)
 	}
 	for _, u := range cfg.Upstreams {
 		logger.Info("upstream", "name", u.Name, "base_url", u.BaseURL)
 	}
-	logger.Info("gateway listening", "addr", cfg.Listen)
-	if err := srv.ListenAndServe(); err != nil {
+	// The address in use, which differs from the config's when its port is 0.
+	logger.Info("gateway listening", "addr", ln.Addr().String())
+	if err := srv.Serve(ctx, ln); err != nil {
 		logger.Error("server stopped", "err", err)
 		os.Exit(1)
 	}
+	logger.Info("gateway stopped")
 }

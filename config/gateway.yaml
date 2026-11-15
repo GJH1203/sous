@@ -1,6 +1,9 @@
 # The gateway's config. It holds no secrets: an *_env field names an
 # environment variable, and the gateway reads the key from it at startup.
 listen: 127.0.0.1:8080
+# Once SIGINT or SIGTERM arrives, how long the requests in flight get to
+# finish. Those still running after that are cut off.
+shutdown_grace: 30s
 
 # llama-server runs one model per process, so locally each logical model has
 # an upstream of its own.

@@ -8,6 +8,7 @@ import (
 	"os"
 	"slices"
 	"strings"
+	"time"
 
 	"go.yaml.in/yaml/v4"
 )
@@ -15,10 +16,14 @@ import (
 // Config is the gateway's config file. It holds no secrets, only the names of
 // the environment variables that do, so it can be committed.
 type Config struct {
-	Listen    string                `yaml:"listen"`
-	Upstreams []Upstream            `yaml:"upstreams"`
-	Models    map[string]ModelRoute `yaml:"models"` // keyed by logical name
-	Callers   []Caller              `yaml:"callers"`
+	Listen string `yaml:"listen"`
+	// ShutdownGrace is how long a shutdown waits for the requests in flight
+	// before it cuts them off. YAML gives it as "30s" or "1m"; a bare number
+	// is an error, not nanoseconds.
+	ShutdownGrace time.Duration         `yaml:"shutdown_grace"`
+	Upstreams     []Upstream            `yaml:"upstreams"`
+	Models        map[string]ModelRoute `yaml:"models"` // keyed by logical name
+	Callers       []Caller              `yaml:"callers"`
 }
 
 // Upstream is a server that speaks the OpenAI-compatible API.
@@ -93,6 +98,12 @@ func (c *Config) check() error {
 
 	if c.Listen == "" {
 		problem("listen is missing")
+	}
+
+	// 0 would cut every request off at once. A missing value is 0 too, so
+	// this also makes the field required.
+	if c.ShutdownGrace <= 0 {
+		problem("shutdown_grace must be more than 0, got %v", c.ShutdownGrace)
 	}
 
 	upstreams := make(map[string]int)

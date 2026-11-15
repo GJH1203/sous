@@ -5,9 +5,10 @@ import (
 	"net/http"
 )
 
-// NewHandler returns everything the gateway serves: proxy on the API paths,
-// OpenAI-shaped errors for anything else, all behind the middleware. proxy is
-// a parameter so that tests can put any handler there.
+// NewHandler returns the API: proxy on the API paths, OpenAI-shaped errors for
+// anything else, all behind the middleware. NewServer puts the health probes
+// in front of it. proxy is a parameter so that tests can put any handler
+// there.
 func NewHandler(cfg *Config, proxy http.Handler, log *slog.Logger) http.Handler {
 	mux := http.NewServeMux()
 	for _, path := range []string{"/v1/chat/completions", "/v1/embeddings"} {

@@ -6,6 +6,7 @@ import (
 	"reflect"
 	"strings"
 	"testing"
+	"time"
 )
 
 // writeConfig writes a config file to a fresh temporary directory.
@@ -33,6 +34,7 @@ models:
 callers:
   - name: app
     api_key_env: TEST_APP_KEY
+shutdown_grace: 1m30s
 `
 
 func setKeys(t *testing.T) {
@@ -47,7 +49,8 @@ func TestLoadConfig(t *testing.T) {
 		t.Fatal(err)
 	}
 	want := &Config{
-		Listen: "127.0.0.1:8080",
+		Listen:        "127.0.0.1:8080",
+		ShutdownGrace: 90 * time.Second,
 		Upstreams: []Upstream{
 			{Name: "local", BaseURL: "http://127.0.0.1:8081"}, // without the trailing slash
 			{Name: "cloud", BaseURL: "https://api.example.com/compat", APIKeyEnv: "TEST_CLOUD_KEY", APIKey: "cloud-secret"},
@@ -103,6 +106,9 @@ func TestConfigProblems(t *testing.T) {
 		{"caller key unset", "", "", "TEST_APP_KEY", "callers[0]: environment variable TEST_APP_KEY is not set"},
 		{"caller without key", "    api_key_env: TEST_APP_KEY\n", "", "", "callers[0]: api_key_env is missing"},
 		{"caller named twice", "callers:\n", "callers:\n  - name: app\n    api_key_env: TEST_APP_KEY\n", "", `callers[1]: name "app" is already used by callers[0]`},
+		{"no grace", "shutdown_grace: 1m30s\n", "", "", "shutdown_grace must be more than 0, got 0s"},
+		{"negative grace", "1m30s", "-1s", "", "shutdown_grace must be more than 0, got -1s"},
+		{"grace without a unit", "1m30s", "30", "", "line 15: cannot construct !!int `30` into time.Duration"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -143,6 +149,7 @@ models:
 `)
 	want := path + ":\n" + strings.Join([]string{
 		"listen is missing",
+		"shutdown_grace must be more than 0, got 0s",
 		`upstreams[0]: base_url "127.0.0.1:8081" is not an http:// or https:// URL`,
 		`models.chat: upstream "c" is not defined`,
 		`models.embed: upstream "d" is not defined`,

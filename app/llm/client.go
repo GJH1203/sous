@@ -50,6 +50,9 @@ type Message struct {
 type ChatRequest struct {
 	Model    string    `json:"model"`
 	Messages []Message `json:"messages"`
+	// Temperature is left to the upstream when nil. 0 picks the likeliest
+	// token every time, so the same request gets the same reply.
+	Temperature *float64 `json:"temperature,omitempty"`
 }
 
 // Error is an answer other than 200, from the gateway or from the upstream

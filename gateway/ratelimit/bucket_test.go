@@ -154,6 +154,23 @@ func TestLongIdleDoesNotOverflow(t *testing.T) {
 	}
 }
 
+func TestFull(t *testing.T) {
+	b := NewTokenBucket(2, 1, t0)
+	if !b.Full(t0) {
+		t.Error("a new bucket is not full")
+	}
+	b.Allow(t0)
+	if b.Full(at(time.Second - time.Nanosecond)) {
+		t.Error("full a nanosecond before the token came back")
+	}
+	if !b.Full(at(time.Second)) {
+		t.Error("not full once the token came back")
+	}
+	if !b.Full(at(time.Hour)) {
+		t.Error("not full after an hour")
+	}
+}
+
 func TestRetryAfterIsZeroWithATokenLeft(t *testing.T) {
 	b := NewTokenBucket(3, 1, t0)
 	b.Allow(t0)

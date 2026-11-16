@@ -6,14 +6,20 @@ listen: 127.0.0.1:8080
 shutdown_grace: 30s
 
 # llama-server runs one model per process, so locally each logical model has
-# an upstream of its own.
+# an upstream of its own. Each runs 4 slots, so the gateway sends it at most 4
+# requests at once, and keeps the rest waiting, for up to queue_timeout
+# (10s unless set).
 upstreams:
   - name: local-extract
     base_url: http://127.0.0.1:8081
+    max_concurrent: 4
   - name: local-chat
     base_url: http://127.0.0.1:8082
+    max_concurrent: 4
+    queue_timeout: 30s # answers with thinking take tens of seconds
   - name: local-embed
     base_url: http://127.0.0.1:8083
+    max_concurrent: 4
   # A cloud upstream would also name the variable that holds its key:
   #   api_key_env: CLOUD_API_KEY
 
@@ -24,6 +30,10 @@ models:
   chat: {upstream: local-chat, model: qwen3.5-9b}
   embed: {upstream: local-embed, model: qwen3-embedding-0.6b}
 
+# A caller may send burst requests at once, then per_second on average. The
+# limit is there to stop a runaway loop: logging a dish takes one or two
+# requests.
 callers:
   - name: app
     api_key_env: SOUS_APP_KEY
+    rate_limit: {burst: 20, per_second: 1}

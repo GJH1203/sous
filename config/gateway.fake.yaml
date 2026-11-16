@@ -8,8 +8,10 @@ shutdown_grace: 10s
 upstreams:
   - name: fake-a
     base_url: http://127.0.0.1:9001
+    max_concurrent: 4
   - name: fake-b
     base_url: http://127.0.0.1:9002
+    max_concurrent: 4
 
 models:
   extract: {upstream: fake-b, model: fake-extract}
@@ -19,3 +21,4 @@ models:
 callers:
   - name: app
     api_key_env: SOUS_APP_KEY
+    rate_limit: {burst: 20, per_second: 1}

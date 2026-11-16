@@ -7,6 +7,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/GJH1203/sous/gateway/ratelimit"
 )
 
 // writeConfig writes a config file to a fresh temporary directory.
@@ -25,15 +27,19 @@ listen: 127.0.0.1:8080
 upstreams:
   - name: local
     base_url: http://127.0.0.1:8081/
+    max_concurrent: 4
   - name: cloud
     base_url: https://api.example.com/compat
     api_key_env: TEST_CLOUD_KEY
+    max_concurrent: 8
+    queue_timeout: 30s
 models:
   chat: {upstream: cloud, model: big-model}
   embed: {upstream: local, model: small-embedder}
 callers:
   - name: app
     api_key_env: TEST_APP_KEY
+    rate_limit: {burst: 20, per_second: 0.5}
 shutdown_grace: 1m30s
 `
 
@@ -52,14 +58,17 @@ func TestLoadConfig(t *testing.T) {
 		Listen:        "127.0.0.1:8080",
 		ShutdownGrace: 90 * time.Second,
 		Upstreams: []Upstream{
-			{Name: "local", BaseURL: "http://127.0.0.1:8081"}, // without the trailing slash
-			{Name: "cloud", BaseURL: "https://api.example.com/compat", APIKeyEnv: "TEST_CLOUD_KEY", APIKey: "cloud-secret"},
+			// Without the trailing slash, and with the default queue timeout.
+			{Name: "local", BaseURL: "http://127.0.0.1:8081", MaxConcurrent: 4, QueueTimeout: 10 * time.Second},
+			{Name: "cloud", BaseURL: "https://api.example.com/compat", APIKeyEnv: "TEST_CLOUD_KEY", APIKey: "cloud-secret",
+				MaxConcurrent: 8, QueueTimeout: 30 * time.Second},
 		},
 		Models: map[string]ModelRoute{
 			"chat":  {Upstream: "cloud", Model: "big-model"},
 			"embed": {Upstream: "local", Model: "small-embedder"},
 		},
-		Callers: []Caller{{Name: "app", APIKeyEnv: "TEST_APP_KEY", APIKey: "app-secret"}},
+		Callers: []Caller{{Name: "app", APIKeyEnv: "TEST_APP_KEY", APIKey: "app-secret",
+			RateLimit: RateLimit{Burst: 20, PerSecond: 0.5}}},
 	}
 	if !reflect.DeepEqual(cfg, want) {
 		t.Errorf("got  %+v\nwant %+v", *cfg, *want)
@@ -90,8 +99,8 @@ func TestConfigProblems(t *testing.T) {
 		unset    string // an environment variable to leave empty
 		want     string
 	}{
-		{"misspelled key", "base_url: https", "base_ur: https", "", "line 7: field base_ur not found"},
-		{"duplicate key", "  embed:", "  chat: {upstream: local, model: x}\n  embed:", "", `line 11: mapping key "chat" already defined at line 10`},
+		{"misspelled key", "base_url: https", "base_ur: https", "", "line 8: field base_ur not found"},
+		{"duplicate key", "  embed:", "  chat: {upstream: local, model: x}\n  embed:", "", `line 14: mapping key "chat" already defined at line 13`},
 		{"no listen", "listen: 127.0.0.1:8080\n", "", "", "listen is missing"},
 		{"no scheme", "http://127.0.0.1:8081/", "127.0.0.1:8081", "", `upstreams[0]: base_url "127.0.0.1:8081" is not an http:// or https:// URL`},
 		{"host as scheme", "http://127.0.0.1:8081/", "localhost:8081", "", `upstreams[0]: base_url "localhost:8081" is not`},
@@ -108,7 +117,17 @@ func TestConfigProblems(t *testing.T) {
 		{"caller named twice", "callers:\n", "callers:\n  - name: app\n    api_key_env: TEST_APP_KEY\n", "", `callers[1]: name "app" is already used by callers[0]`},
 		{"no grace", "shutdown_grace: 1m30s\n", "", "", "shutdown_grace must be more than 0, got 0s"},
 		{"negative grace", "1m30s", "-1s", "", "shutdown_grace must be more than 0, got -1s"},
-		{"grace without a unit", "1m30s", "30", "", "line 15: cannot construct !!int `30` into time.Duration"},
+		{"grace without a unit", "1m30s", "30", "", "line 19: cannot construct !!int `30` into time.Duration"},
+		{"no max_concurrent", "    max_concurrent: 4\n", "", "", "upstreams[0]: max_concurrent must be at least 1, got 0"},
+		{"negative max_concurrent", "max_concurrent: 8", "max_concurrent: -1", "", "upstreams[1]: max_concurrent must be at least 1, got -1"},
+		{"negative queue_timeout", "queue_timeout: 30s", "queue_timeout: -1s", "", "upstreams[1]: queue_timeout must be more than 0, got -1s"},
+		{"no rate_limit", "    rate_limit: {burst: 20, per_second: 0.5}\n", "", "", "callers[0]: rate_limit.burst must be between 1 and 1000000, got 0"},
+		{"no per_second", "per_second: 0.5", "per_second: 0", "", "callers[0]: rate_limit.per_second must be between 0.001 and 1000000, got 0"},
+		{"burst too big", "burst: 20", "burst: 1000001", "", "callers[0]: rate_limit.burst must be between 1 and 1000000, got 1000001"},
+		{"rate too low", "per_second: 0.5", "per_second: 0.0009", "", "rate_limit.per_second must be between 0.001 and 1000000, got 0.0009"},
+		{"rate too high", "per_second: 0.5", "per_second: 1e7", "", "rate_limit.per_second must be between 0.001 and 1000000, got 1e+07"},
+		{"rate NaN", "per_second: 0.5", "per_second: .nan", "", "rate_limit.per_second must be between 0.001 and 1000000, got NaN"},
+		{"rate infinite", "per_second: 0.5", "per_second: .inf", "", "rate_limit.per_second must be between 0.001 and 1000000, got +Inf"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -136,6 +155,23 @@ func TestConfigProblems(t *testing.T) {
 	}
 }
 
+// The rate limits the config check lets through, at their extremes, are all
+// buckets that NewTokenBucket makes without a panic.
+func TestRateLimitBoundsMakeBuckets(t *testing.T) {
+	for _, burst := range []int{1, 1_000_000} {
+		for _, rate := range []float64{0.001, 1_000_000} {
+			func() {
+				defer func() {
+					if v := recover(); v != nil {
+						t.Errorf("burst %d, per_second %v: %v", burst, rate, v)
+					}
+				}()
+				ratelimit.NewTokenBucket(burst, rate, time.Now())
+			}()
+		}
+	}
+}
+
 // Every problem is reported, one per line, in the same order every time.
 func TestConfigReportsEveryProblem(t *testing.T) {
 	path := writeConfig(t, `
@@ -151,6 +187,7 @@ models:
 		"listen is missing",
 		"shutdown_grace must be more than 0, got 0s",
 		`upstreams[0]: base_url "127.0.0.1:8081" is not an http:// or https:// URL`,
+		"upstreams[0]: max_concurrent must be at least 1, got 0",
 		`models.chat: upstream "c" is not defined`,
 		`models.embed: upstream "d" is not defined`,
 		`models.extract: upstream "b" is not defined`,

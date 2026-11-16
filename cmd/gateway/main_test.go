@@ -63,11 +63,13 @@ shutdown_grace: %s
 upstreams:
   - name: fake
     base_url: %s
+    max_concurrent: 4
 models:
   chat: {upstream: fake, model: chat}
 callers:
   - name: test
     api_key_env: TEST_GATEWAY_KEY
+    rate_limit: {burst: 20, per_second: 1}
 `, listen, grace, upstream)
 	if err := os.WriteFile(config, []byte(text), 0o600); err != nil {
 		t.Fatal(err)

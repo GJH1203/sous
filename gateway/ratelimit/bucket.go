@@ -72,6 +72,14 @@ func (b *TokenBucket) Allow(now time.Time) bool {
 	return true
 }
 
+// Full reports whether the bucket is full at now. A full bucket behaves
+// exactly like a new one, so whoever keeps buckets can drop it, and make a
+// new one when it is next needed.
+func (b *TokenBucket) Full(now time.Time) bool {
+	b.refill(now)
+	return b.level == b.full
+}
+
 // RetryAfter says how long after now the next token will be there: 0 if
 // there is one already.
 func (b *TokenBucket) RetryAfter(now time.Time) time.Duration {

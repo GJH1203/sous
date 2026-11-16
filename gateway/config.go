@@ -35,7 +35,18 @@ type Upstream struct {
 	// upstream. Local servers need none.
 	APIKeyEnv string `yaml:"api_key_env"`
 	APIKey    string `yaml:"-"` // read from APIKeyEnv by LoadConfig
+	// MaxConcurrent is how many requests the upstream gets at once; the rest
+	// wait in the gateway. For llama-server, its number of slots.
+	MaxConcurrent int `yaml:"max_concurrent"`
+	// QueueTimeout is how long a request waits for one of those. Missing
+	// means 10 s.
+	QueueTimeout time.Duration `yaml:"queue_timeout"`
 }
+
+// defaultQueueTimeout is many extractions' worth of waiting, as each takes
+// under a second, and still short enough that a person on Discord does not
+// give up first.
+const defaultQueueTimeout = 10 * time.Second
 
 // ModelRoute says which upstream serves a logical model, and under what name.
 type ModelRoute struct {
@@ -45,9 +56,17 @@ type ModelRoute struct {
 
 // Caller is a client of the gateway, such as the cooking app.
 type Caller struct {
-	Name      string `yaml:"name"`
-	APIKeyEnv string `yaml:"api_key_env"`
-	APIKey    string `yaml:"-"` // read from APIKeyEnv by LoadConfig
+	Name      string    `yaml:"name"`
+	APIKeyEnv string    `yaml:"api_key_env"`
+	APIKey    string    `yaml:"-"` // read from APIKeyEnv by LoadConfig
+	RateLimit RateLimit `yaml:"rate_limit"`
+}
+
+// RateLimit is a caller's token bucket: it may send Burst requests at once,
+// and PerSecond on average.
+type RateLimit struct {
+	Burst     int     `yaml:"burst"`
+	PerSecond float64 `yaml:"per_second"`
 }
 
 // LoadConfig reads and checks the config file, and reads the keys it names
@@ -123,6 +142,18 @@ func (c *Config) check() error {
 		if u.APIKeyEnv != "" {
 			u.APIKey = secret(where, u.APIKeyEnv)
 		}
+		// No default: the right number depends on the server, and a guess
+		// that is too high just moves the queue into the engine, where it
+		// cannot be seen or timed out.
+		if u.MaxConcurrent < 1 {
+			problem("%s: max_concurrent must be at least 1, got %d", where, u.MaxConcurrent)
+		}
+		switch {
+		case u.QueueTimeout == 0:
+			u.QueueTimeout = defaultQueueTimeout
+		case u.QueueTimeout < 0:
+			problem("%s: queue_timeout must be more than 0, got %v", where, u.QueueTimeout)
+		}
 	}
 
 	if len(c.Models) == 0 {
@@ -149,6 +180,16 @@ func (c *Config) check() error {
 			problem("%s: api_key_env is missing", where)
 		} else {
 			k.APIKey = secret(where, k.APIKeyEnv)
+		}
+		// Far wider than any real setting, and narrow enough that every
+		// bucket they allow fits in a Duration, so NewTokenBucket never
+		// panics on a config that loaded. Written the positive way round so
+		// that NaN fails too.
+		if !(k.RateLimit.Burst >= 1 && k.RateLimit.Burst <= 1_000_000) {
+			problem("%s: rate_limit.burst must be between 1 and 1000000, got %d", where, k.RateLimit.Burst)
+		}
+		if !(k.RateLimit.PerSecond >= 0.001 && k.RateLimit.PerSecond <= 1_000_000) {
+			problem("%s: rate_limit.per_second must be between 0.001 and 1000000, got %v", where, k.RateLimit.PerSecond)
 		}
 	}
 	return errors.Join(errs...)

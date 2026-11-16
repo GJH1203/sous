@@ -16,10 +16,14 @@ type apiError struct {
 }
 
 // writeError sends an error the gateway itself produced. Callers branch on
-// the status and code; the type only tells their mistakes from ours.
+// the status and code; the type only tells their mistakes from ours, and a
+// limit from either.
 func writeError(w http.ResponseWriter, status int, code, message string) {
 	typ := "invalid_request_error"
-	if status >= 500 {
+	switch {
+	case status == http.StatusTooManyRequests:
+		typ = "rate_limit_error"
+	case status >= 500:
 		typ = "server_error"
 	}
 	w.Header().Set("Content-Type", "application/json")

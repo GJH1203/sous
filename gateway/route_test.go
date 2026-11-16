@@ -33,8 +33,8 @@ func twoUpstreams(t *testing.T) (a, b *fakeupstream.Server, gatewayURL string) {
 	b, bURL := start("b")
 	gw, client := startGatewayWith(t, &Config{
 		Upstreams: []Upstream{
-			{Name: "a", BaseURL: aURL},
-			{Name: "b", BaseURL: bURL, APIKey: "b-key"},
+			{Name: "a", BaseURL: aURL, MaxConcurrent: 100, QueueTimeout: 10 * time.Second},
+			{Name: "b", BaseURL: bURL, APIKey: "b-key", MaxConcurrent: 100, QueueTimeout: 10 * time.Second},
 		},
 		Models: map[string]ModelRoute{
 			"embed": {Upstream: "a", Model: "a-embedder"},

@@ -32,6 +32,10 @@ type options struct {
 	fake          func(*fakeupstream.Config)
 	// connState, if set, watches the upstream's connections.
 	connState func(net.Conn, http.ConnState)
+	// The upstream's limit, if not the default of 100 at once, waiting up
+	// to 10 s.
+	maxConcurrent int
+	queueTimeout  time.Duration
 }
 
 func setup(t *testing.T, o options) rig {
@@ -51,7 +55,14 @@ func setup(t *testing.T, o options) rig {
 	if o.headerTimeout == 0 {
 		o.headerTimeout = 5 * time.Second
 	}
-	gw, client, logs := startGatewayLogged(t, oneUpstream(upstream.URL, o.apiKey), o.headerTimeout)
+	gwCfg := oneUpstream(upstream.URL, o.apiKey)
+	if o.maxConcurrent != 0 {
+		gwCfg.Upstreams[0].MaxConcurrent = o.maxConcurrent
+	}
+	if o.queueTimeout != 0 {
+		gwCfg.Upstreams[0].QueueTimeout = o.queueTimeout
+	}
+	gw, client, logs := startGatewayLogged(t, gwCfg, o.headerTimeout)
 	t.Cleanup(func() {
 		fake.Close() // first: both servers' Close wait for requests it holds
 		gw.Close()
@@ -66,7 +77,7 @@ func setup(t *testing.T, o options) rig {
 // direct.
 func oneUpstream(upstream, apiKey string) *Config {
 	return &Config{
-		Upstreams: []Upstream{{Name: "fake", BaseURL: upstream, APIKey: apiKey}},
+		Upstreams: []Upstream{{Name: "fake", BaseURL: upstream, APIKey: apiKey, MaxConcurrent: 100, QueueTimeout: 10 * time.Second}},
 		Models: map[string]ModelRoute{
 			"chat":  {Upstream: "fake", Model: "chat"},
 			"embed": {Upstream: "fake", Model: "embed"},
@@ -93,7 +104,7 @@ const testKey = "test-caller-key"
 // output, and to the buffer it returns.
 func startGatewayLogged(t *testing.T, cfg *Config, headerTimeout time.Duration) (*httptest.Server, *http.Client, *lockedBuffer) {
 	t.Helper()
-	cfg.Callers = []Caller{{Name: "test", APIKey: testKey}}
+	cfg.Callers = []Caller{{Name: "test", APIKey: testKey, RateLimit: generous}}
 	client := NewClient(headerTimeout)
 	logs := &lockedBuffer{}
 	logger := slog.New(slog.NewJSONHandler(io.MultiWriter(t.Output(), logs), nil))

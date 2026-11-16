@@ -27,8 +27,10 @@ func NewHandler(cfg *Config, proxy http.Handler, log *slog.Logger) http.Handler 
 	})
 
 	// Each wrap goes around everything before it, so the last one runs
-	// first: request ID, access log, recovery, authentication, then the routes.
+	// first: request ID, access log, recovery, authentication, rate limit,
+	// then the routes.
 	var h http.Handler = mux
+	h = withRateLimit(h, newCallerLimits(cfg.Callers))
 	h = withAuth(h, cfg.Callers)
 	h = withRecovery(h, log)
 	h = withAccessLog(h, log)

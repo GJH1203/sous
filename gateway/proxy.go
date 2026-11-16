@@ -54,19 +54,26 @@ type route struct {
 	baseURL  string
 	apiKey   string // the gateway's own key for the upstream; empty for none
 	model    string // the upstream's name for the model
+	// slots belongs to the upstream, not the model: every model the
+	// upstream serves shares it.
+	slots        slots
+	queueTimeout time.Duration
 }
 
 // NewProxy returns a Proxy that routes by cfg, which must have come from
 // LoadConfig: it checks that every model's upstream exists.
 func NewProxy(client *http.Client, cfg *Config, log *slog.Logger) *Proxy {
 	upstreams := make(map[string]Upstream)
+	slotsOf := make(map[string]slots)
 	for _, u := range cfg.Upstreams {
 		upstreams[u.Name] = u
+		slotsOf[u.Name] = make(slots, u.MaxConcurrent)
 	}
 	routes := make(map[string]route)
 	for name, m := range cfg.Models {
 		u := upstreams[m.Upstream]
-		routes[name] = route{upstream: u.Name, baseURL: u.BaseURL, apiKey: u.APIKey, model: m.Model}
+		routes[name] = route{upstream: u.Name, baseURL: u.BaseURL, apiKey: u.APIKey, model: m.Model,
+			slots: slotsOf[u.Name], queueTimeout: u.QueueTimeout}
 	}
 	return &Proxy{client: client, routes: routes, log: log}
 }
@@ -125,6 +132,17 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		// So that the upstream's log lines can be matched with the gateway's.
 		req.Header.Set("X-Request-ID", id)
 	}
+
+	if err := rt.slots.acquire(r.Context(), rt.queueTimeout); err != nil {
+		if errors.Is(err, errNoSlot) {
+			writeError(w, http.StatusServiceUnavailable, "upstream_busy",
+				fmt.Sprintf("the upstream is busy, and no slot came free within %v", rt.queueTimeout))
+		}
+		return // otherwise the caller left while waiting; there is no one to answer
+	}
+	// Deferred, so the slot is held until the whole answer is relayed: a
+	// stream keeps its slot in the engine until its last token.
+	defer rt.slots.release()
 
 	resp, err := p.client.Do(req)
 	if err != nil {

@@ -50,14 +50,17 @@ func (b *lockedBuffer) lines(t *testing.T) []map[string]any {
 	return out
 }
 
+// generous is a rate limit that tests never reach.
+var generous = RateLimit{Burst: 1_000_000, PerSecond: 1_000_000}
+
 // startHandler serves NewHandler with h in the proxy's place and two callers,
 // and returns its URL and its JSON log.
 func startHandler(t *testing.T, h http.Handler) (string, *lockedBuffer) {
 	t.Helper()
 	logs := &lockedBuffer{}
 	cfg := &Config{Callers: []Caller{
-		{Name: "app", APIKey: "app-key"},
-		{Name: "other", APIKey: "other-key"},
+		{Name: "app", APIKey: "app-key", RateLimit: generous},
+		{Name: "other", APIKey: "other-key", RateLimit: generous},
 	}}
 	srv := httptest.NewServer(NewHandler(cfg, h, slog.New(slog.NewJSONHandler(logs, nil))))
 	t.Cleanup(srv.Close)

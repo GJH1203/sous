@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -20,6 +21,11 @@ const (
 	Chat    = "chat"    // questions that need reasoning: slow, called rarely
 	Embed   = "embed"   // text into vectors
 )
+
+// deadline is the longest the app waits for any one answer, sent to the
+// gateway as X-Timeout-Ms. It matches the slowest model's own limit there, a
+// chat answer with thinking; the gateway uses whichever is sooner.
+const deadline = 180 * time.Second
 
 // Client calls the gateway's OpenAI-compatible API.
 type Client struct {
@@ -34,9 +40,10 @@ func New(baseURL, key string) *Client {
 	return &Client{
 		baseURL: strings.TrimSuffix(baseURL, "/"),
 		key:     key,
-		// The gateway gives up on an upstream after 120 s, so this only
+		// Longer than the deadline sent with each request, so that the
+		// gateway's 504, which says what was slow, comes first. This only
 		// catches a gateway that hangs.
-		http: &http.Client{Timeout: 150 * time.Second},
+		http: &http.Client{Timeout: deadline + 10*time.Second},
 	}
 }
 
@@ -144,6 +151,7 @@ func (c *Client) post(ctx context.Context, path, feature string, body, out any) 
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Authorization", "Bearer "+c.key)
 	req.Header.Set("X-Feature", feature)
+	req.Header.Set("X-Timeout-Ms", strconv.FormatInt(deadline.Milliseconds(), 10))
 	resp, err := c.http.Do(req)
 	if err != nil {
 		return err

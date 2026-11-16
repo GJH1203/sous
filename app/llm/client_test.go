@@ -54,6 +54,7 @@ func TestChat(t *testing.T) {
 		"Authorization": "Bearer " + testKey,
 		"X-Feature":     "record",
 		"Content-Type":  "application/json",
+		"X-Timeout-Ms":  "180000",
 	} {
 		if got := last.Header.Get(name); got != want {
 			t.Errorf("%s: %q, want %q", name, got, want)

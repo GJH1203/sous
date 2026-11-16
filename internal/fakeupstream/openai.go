@@ -78,7 +78,7 @@ func (s *Server) chat(w http.ResponseWriter, r *http.Request, c call, body []byt
 		return
 	}
 	// A real server sends nothing until the whole reply is generated.
-	s.pause(r.Context(), time.Duration(len(parts))*c.cfg.ChunkInterval)
+	s.pause(r.Context(), c.cfg.PromptDelay+time.Duration(len(parts))*c.cfg.ChunkInterval)
 	stop := "stop"
 	out.Object = "chat.completion"
 	out.Choices = []choice{{Message: &message{Role: "assistant", Content: strings.Join(parts, "")}, FinishReason: &stop}}
@@ -98,6 +98,11 @@ func (s *Server) stream(w http.ResponseWriter, r *http.Request, cfg Config, out 
 	w.WriteHeader(http.StatusOK)
 
 	rc := http.NewResponseController(w)
+	if cfg.PromptDelay > 0 {
+		// The headers go out on their own, before any event.
+		rc.Flush()
+		s.pause(r.Context(), cfg.PromptDelay)
+	}
 	out.Object = "chat.completion.chunk"
 	send := func(choices []choice, u *usage) {
 		out.Choices, out.Usage = choices, u
@@ -173,6 +178,7 @@ func (s *Server) embeddings(w http.ResponseWriter, r *http.Request, c call, body
 		out.Usage.PromptTokens += utf8.RuneCountInString(in)
 	}
 	out.Usage.TotalTokens = out.Usage.PromptTokens
+	s.pause(r.Context(), c.cfg.PromptDelay)
 	writeReply(w, c.cfg, out)
 	s.countTokens(out.Usage.PromptTokens, 0)
 }

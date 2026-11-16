@@ -433,6 +433,38 @@ func TestDelay(t *testing.T) {
 	waitFor(t, "concurrency to return to 0", func() bool { return fake.Stats().Concurrent == 0 })
 }
 
+// A stream gets its headers at once and its first event after the prompt
+// delay; a non-streamed reply gets both after it.
+func TestPromptDelay(t *testing.T) {
+	const delay = 200 * time.Millisecond
+	_, url := start(t, func(c *fakeupstream.Config) { c.PromptDelay = delay })
+
+	began := time.Now()
+	resp, err := do(t, context.Background(), "POST", url+"/v1/chat/completions",
+		`{"stream":true,"messages":[{"content":"hi"}]}`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if took := time.Since(began); took > delay/2 {
+		t.Errorf("stream headers came after %v; they should not wait", took)
+	}
+	if _, err := bufio.NewReader(resp.Body).ReadByte(); err != nil {
+		t.Fatal(err)
+	}
+	if took := time.Since(began); took < delay {
+		t.Errorf("first event came after %v, before the %v prompt delay", took, delay)
+	}
+
+	for _, path := range []string{"/v1/chat/completions", "/v1/embeddings"} {
+		began := time.Now()
+		call(t, "POST", url+path, `{"messages":[{"content":"hi"}],"input":"x"}`)
+		if took := time.Since(began); took < delay {
+			t.Errorf("%s answered after %v, before the %v prompt delay", path, took, delay)
+		}
+	}
+}
+
 func TestNonStreamWaitsForWholeReply(t *testing.T) {
 	_, url := start(t, func(c *fakeupstream.Config) {
 		c.Chunks = 4
@@ -563,12 +595,12 @@ func TestConfigEndpoint(t *testing.T) {
 		t.Errorf("durations should be strings: %s", body)
 	}
 
-	status, _, body := call(t, "POST", url+"/_config", `{"fail_rate":1,"fail_status":429,"retry_after":1,"delay":"5ms"}`)
+	status, _, body := call(t, "POST", url+"/_config", `{"fail_rate":1,"fail_status":429,"retry_after":1,"delay":"5ms","prompt_delay":"7ms"}`)
 	if status != 200 {
 		t.Fatalf("status %d: %s", status, body)
 	}
 	got := fake.Config()
-	if got.FailRate != 1 || got.FailStatus != 429 || got.Delay != 5*time.Millisecond || got.Chunks != 7 {
+	if got.FailRate != 1 || got.FailStatus != 429 || got.Delay != 5*time.Millisecond || got.PromptDelay != 7*time.Millisecond || got.Chunks != 7 {
 		t.Errorf("config after merge = %+v", got)
 	}
 	status, header, body := call(t, "POST", url+"/v1/chat/completions", chatBody)
@@ -581,6 +613,7 @@ func TestConfigEndpoint(t *testing.T) {
 		`{"fail_rat":1}`,
 		`{"delay":5}`,
 		`{"delay":"soon"}`,
+		`{"prompt_delay":"-1s"}`,
 		`{"chunks":0}`,
 		`{"fail_status":200}`,
 	} {

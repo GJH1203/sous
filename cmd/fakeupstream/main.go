@@ -24,6 +24,7 @@ func main() {
 	flag.IntVar(&cfg.Dims, "dims", cfg.Dims, "embedding dimensions")
 	flag.DurationVar(&cfg.LoadTime, "load-time", cfg.LoadTime, "answer 503 \"Loading model\" for this long after start")
 	flag.DurationVar(&cfg.Delay, "delay", cfg.Delay, "delay before the response headers")
+	flag.DurationVar(&cfg.PromptDelay, "prompt-delay", cfg.PromptDelay, "time spent reading the prompt: a stream gets its headers before it, its first event after")
 	flag.BoolVar(&cfg.Hang, "hang", cfg.Hang, "read requests and never answer")
 	flag.IntVar(&cfg.FailFirst, "fail-first", cfg.FailFirst, "fail the first N requests")
 	flag.Float64Var(&cfg.FailRate, "fail-rate", cfg.FailRate, "fail each request with this probability")

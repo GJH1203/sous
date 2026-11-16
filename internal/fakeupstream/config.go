@@ -33,6 +33,11 @@ type Config struct {
 
 	// Delay holds back the response headers, and with them the first byte.
 	Delay time.Duration
+	// PromptDelay is the time spent reading the prompt. A stream sends its
+	// headers first and its first event only after this, as llama-server
+	// does once a request has a slot; a non-streamed reply just comes this
+	// much later.
+	PromptDelay time.Duration
 	// Hang reads the request and never answers, until the caller gives up.
 	Hang bool
 	// FailFirst makes the first N model requests since start or the last
@@ -76,6 +81,7 @@ func (c Config) validate() error {
 	check(c.Dims >= 1 && c.Dims <= 4096, "dims must be between 1 and 4096, got %d", c.Dims)
 	check(c.LoadTime >= 0, "load_time must not be negative, got %s", c.LoadTime)
 	check(c.Delay >= 0, "delay must not be negative, got %s", c.Delay)
+	check(c.PromptDelay >= 0, "prompt_delay must not be negative, got %s", c.PromptDelay)
 	check(c.FailFirst >= 0, "fail_first must not be negative, got %d", c.FailFirst)
 	// Written this way round so that NaN fails too.
 	check(c.FailRate >= 0 && c.FailRate <= 1, "fail_rate must be between 0 and 1, got %g", c.FailRate)
@@ -96,6 +102,7 @@ type configJSON struct {
 	Dims          int     `json:"dims"`
 	LoadTime      string  `json:"load_time"`
 	Delay         string  `json:"delay"`
+	PromptDelay   string  `json:"prompt_delay"`
 	Hang          bool    `json:"hang"`
 	FailFirst     int     `json:"fail_first"`
 	FailRate      float64 `json:"fail_rate"`
@@ -114,6 +121,7 @@ func (c Config) toJSON() configJSON {
 		Dims:          c.Dims,
 		LoadTime:      c.LoadTime.String(),
 		Delay:         c.Delay.String(),
+		PromptDelay:   c.PromptDelay.String(),
 		Hang:          c.Hang,
 		FailFirst:     c.FailFirst,
 		FailRate:      c.FailRate,
@@ -141,6 +149,7 @@ func (j configJSON) toConfig() (Config, error) {
 		Dims:          j.Dims,
 		LoadTime:      duration("load_time", j.LoadTime),
 		Delay:         duration("delay", j.Delay),
+		PromptDelay:   duration("prompt_delay", j.PromptDelay),
 		Hang:          j.Hang,
 		FailFirst:     j.FailFirst,
 		FailRate:      j.FailRate,

@@ -27,15 +27,18 @@ type rig struct {
 }
 
 type options struct {
-	apiKey        string
-	headerTimeout time.Duration
-	fake          func(*fakeupstream.Config)
+	apiKey string
+	fake   func(*fakeupstream.Config)
 	// connState, if set, watches the upstream's connections.
 	connState func(net.Conn, http.ConnState)
 	// The upstream's limit, if not the default of 100 at once, waiting up
 	// to 10 s.
 	maxConcurrent int
 	queueTimeout  time.Duration
+	// The models' timeouts, if not roomy.
+	timeouts Timeouts
+	// dial, if set, stands in for the network.
+	dial dialFunc
 }
 
 func setup(t *testing.T, o options) rig {
@@ -52,9 +55,6 @@ func setup(t *testing.T, o options) rig {
 	upstream := httptest.NewUnstartedServer(fake)
 	upstream.Config.ConnState = o.connState
 	upstream.Start()
-	if o.headerTimeout == 0 {
-		o.headerTimeout = 5 * time.Second
-	}
 	gwCfg := oneUpstream(upstream.URL, o.apiKey)
 	if o.maxConcurrent != 0 {
 		gwCfg.Upstreams[0].MaxConcurrent = o.maxConcurrent
@@ -62,7 +62,17 @@ func setup(t *testing.T, o options) rig {
 	if o.queueTimeout != 0 {
 		gwCfg.Upstreams[0].QueueTimeout = o.queueTimeout
 	}
-	gw, client, logs := startGatewayLogged(t, gwCfg, o.headerTimeout)
+	if o.timeouts != (Timeouts{}) {
+		for name, m := range gwCfg.Models {
+			m.Timeouts = o.timeouts
+			gwCfg.Models[name] = m
+		}
+	}
+	client := NewClient()
+	if o.dial != nil {
+		client = newClient(o.dial)
+	}
+	gw, logs := startGatewayLogged(t, gwCfg, client)
 	t.Cleanup(func() {
 		fake.Close() // first: both servers' Close wait for requests it holds
 		gw.Close()
@@ -72,6 +82,9 @@ func setup(t *testing.T, o options) rig {
 	return rig{fake: fake, fakeURL: upstream.URL, gatewayURL: gw.URL, logs: logs}
 }
 
+// roomy is timeouts that a test runs into only on purpose.
+var roomy = Timeouts{Connect: 5 * time.Second, FirstByte: 5 * time.Second, Idle: 5 * time.Second, Total: 10 * time.Second}
+
 // oneUpstream is a config with a single upstream. The upstream knows each
 // model by its logical name, so a reply is the same through the gateway as
 // direct.
@@ -79,20 +92,21 @@ func oneUpstream(upstream, apiKey string) *Config {
 	return &Config{
 		Upstreams: []Upstream{{Name: "fake", BaseURL: upstream, APIKey: apiKey, MaxConcurrent: 100, QueueTimeout: 10 * time.Second}},
 		Models: map[string]ModelRoute{
-			"chat":  {Upstream: "fake", Model: "chat"},
-			"embed": {Upstream: "fake", Model: "embed"},
+			"chat":  {Upstream: "fake", Model: "chat", Timeouts: roomy},
+			"embed": {Upstream: "fake", Model: "embed", Timeouts: roomy},
 		},
 	}
 }
 
-func startGateway(t *testing.T, upstream, apiKey string, headerTimeout time.Duration) (*httptest.Server, *http.Client) {
+func startGateway(t *testing.T, upstream, apiKey string) (*httptest.Server, *http.Client) {
 	t.Helper()
-	return startGatewayWith(t, oneUpstream(upstream, apiKey), headerTimeout)
+	return startGatewayWith(t, oneUpstream(upstream, apiKey))
 }
 
-func startGatewayWith(t *testing.T, cfg *Config, headerTimeout time.Duration) (*httptest.Server, *http.Client) {
+func startGatewayWith(t *testing.T, cfg *Config) (*httptest.Server, *http.Client) {
 	t.Helper()
-	gw, client, _ := startGatewayLogged(t, cfg, headerTimeout)
+	client := NewClient()
+	gw, _ := startGatewayLogged(t, cfg, client)
 	return gw, client
 }
 
@@ -101,14 +115,13 @@ const testKey = "test-caller-key"
 
 // startGatewayLogged starts the whole gateway, middleware included, with
 // cfg's callers replaced by the test caller. Its JSON log goes to the test's
-// output, and to the buffer it returns.
-func startGatewayLogged(t *testing.T, cfg *Config, headerTimeout time.Duration) (*httptest.Server, *http.Client, *lockedBuffer) {
+// output, and to the buffer it returns. client is how it reaches upstreams.
+func startGatewayLogged(t *testing.T, cfg *Config, client *http.Client) (*httptest.Server, *lockedBuffer) {
 	t.Helper()
 	cfg.Callers = []Caller{{Name: "test", APIKey: testKey, RateLimit: generous}}
-	client := NewClient(headerTimeout)
 	logs := &lockedBuffer{}
 	logger := slog.New(slog.NewJSONHandler(io.MultiWriter(t.Output(), logs), nil))
-	return httptest.NewServer(NewHandler(cfg, NewProxy(client, cfg, logger), logger)), client, logs
+	return httptest.NewServer(NewHandler(cfg, NewProxy(client, cfg, logger), logger)), logs
 }
 
 // newRequest is a JSON POST with the test caller's key.
@@ -219,7 +232,7 @@ func TestCallerKeyIsReplaced(t *testing.T) {
 func TestUpstreamDown(t *testing.T) {
 	down := httptest.NewServer(http.NotFoundHandler())
 	down.Close() // nothing listens on its port any more
-	gw, client := startGateway(t, down.URL, "", 5*time.Second)
+	gw, client := startGateway(t, down.URL, "")
 	defer gw.Close()
 	defer client.CloseIdleConnections()
 
@@ -236,23 +249,6 @@ func TestUpstreamDown(t *testing.T) {
 	if strings.Contains(string(body), strings.TrimPrefix(down.URL, "http://")) {
 		t.Errorf("error leaks the upstream address: %s", body)
 	}
-}
-
-func TestHeaderTimeout(t *testing.T) {
-	r := setup(t, options{
-		headerTimeout: 100 * time.Millisecond,
-		fake:          func(c *fakeupstream.Config) { c.Hang = true },
-	})
-	began := time.Now()
-	resp, body := post(t, r.gatewayURL+"/v1/embeddings", nil, embedBody)
-	if took := time.Since(began); took > time.Second {
-		t.Errorf("took %v with a 100ms header timeout", took)
-	}
-	if e := gatewayError(t, body); resp.StatusCode != 504 || e.Code != "upstream_timeout" {
-		t.Errorf("got %d %s", resp.StatusCode, body)
-	}
-	// Giving up also closes the upstream request.
-	waitFor(t, time.Second, "the upstream request to end", func() bool { return r.fake.Stats().Concurrent == 0 })
 }
 
 func TestUpstreamErrorPassesThrough(t *testing.T) {
@@ -303,7 +299,7 @@ func TestHopByHopHeadersDropped(t *testing.T) {
 		io.WriteString(w, "{}")
 	}))
 	defer upstream.Close()
-	gw, client := startGateway(t, upstream.URL, "", 5*time.Second)
+	gw, client := startGateway(t, upstream.URL, "")
 	defer gw.Close()
 	defer client.CloseIdleConnections()
 

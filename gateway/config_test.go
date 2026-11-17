@@ -34,8 +34,8 @@ upstreams:
     max_concurrent: 8
     queue_timeout: 30s
 models:
-  chat: {upstream: cloud, model: big-model}
-  embed: {upstream: local, model: small-embedder}
+  chat: {upstream: cloud, model: big-model, timeouts: {connect: 3s, first_byte: 1m, idle: 15s, total: 3m}}
+  embed: {upstream: local, model: small-embedder, timeouts: {connect: 1s, first_byte: 5s, idle: 5s, total: 15s}}
 callers:
   - name: app
     api_key_env: TEST_APP_KEY
@@ -64,8 +64,10 @@ func TestLoadConfig(t *testing.T) {
 				MaxConcurrent: 8, QueueTimeout: 30 * time.Second},
 		},
 		Models: map[string]ModelRoute{
-			"chat":  {Upstream: "cloud", Model: "big-model"},
-			"embed": {Upstream: "local", Model: "small-embedder"},
+			"chat": {Upstream: "cloud", Model: "big-model",
+				Timeouts: Timeouts{Connect: 3 * time.Second, FirstByte: time.Minute, Idle: 15 * time.Second, Total: 3 * time.Minute}},
+			"embed": {Upstream: "local", Model: "small-embedder",
+				Timeouts: Timeouts{Connect: time.Second, FirstByte: 5 * time.Second, Idle: 5 * time.Second, Total: 15 * time.Second}},
 		},
 		Callers: []Caller{{Name: "app", APIKeyEnv: "TEST_APP_KEY", APIKey: "app-secret",
 			RateLimit: RateLimit{Burst: 20, PerSecond: 0.5}}},
@@ -110,8 +112,8 @@ func TestConfigProblems(t *testing.T) {
 		{"upstream named twice", "name: cloud", "name: local", "", `upstreams[1]: name "local" is already used by upstreams[0]`},
 		{"upstream key unset", "", "", "TEST_CLOUD_KEY", "upstreams[1]: environment variable TEST_CLOUD_KEY is not set"},
 		{"unknown upstream", "upstream: cloud", "upstream: clod", "", `models.chat: upstream "clod" is not defined`},
-		{"no model name", "cloud, model: big-model}", "cloud}", "", "models.chat: model is missing"},
-		{"no models", "models:\n  chat: {upstream: cloud, model: big-model}\n  embed: {upstream: local, model: small-embedder}\n", "", "", "models: none are defined"},
+		{"no model name", " model: big-model,", "", "", "models.chat: model is missing"},
+		{"no models", "models:\n  chat: {upstream: cloud, model: big-model, timeouts: {connect: 3s, first_byte: 1m, idle: 15s, total: 3m}}\n  embed: {upstream: local, model: small-embedder, timeouts: {connect: 1s, first_byte: 5s, idle: 5s, total: 15s}}\n", "", "", "models: none are defined"},
 		{"caller key unset", "", "", "TEST_APP_KEY", "callers[0]: environment variable TEST_APP_KEY is not set"},
 		{"caller without key", "    api_key_env: TEST_APP_KEY\n", "", "", "callers[0]: api_key_env is missing"},
 		{"caller named twice", "callers:\n", "callers:\n  - name: app\n    api_key_env: TEST_APP_KEY\n", "", `callers[1]: name "app" is already used by callers[0]`},
@@ -128,6 +130,11 @@ func TestConfigProblems(t *testing.T) {
 		{"rate too high", "per_second: 0.5", "per_second: 1e7", "", "rate_limit.per_second must be between 0.001 and 1000000, got 1e+07"},
 		{"rate NaN", "per_second: 0.5", "per_second: .nan", "", "rate_limit.per_second must be between 0.001 and 1000000, got NaN"},
 		{"rate infinite", "per_second: 0.5", "per_second: .inf", "", "rate_limit.per_second must be between 0.001 and 1000000, got +Inf"},
+		{"no timeouts", ", timeouts: {connect: 1s, first_byte: 5s, idle: 5s, total: 15s}", "", "", "models.embed: timeouts is missing"},
+		{"no idle timeout", "idle: 15s, ", "", "", "models.chat: timeouts.idle must be more than 0, got 0s"},
+		{"negative connect timeout", "connect: 3s", "connect: -1s", "", "models.chat: timeouts.connect must be more than 0, got -1s"},
+		{"first byte after total", "total: 3m", "total: 30s", "", "models.chat: timeouts.first_byte (1m0s) is longer than timeouts.total (30s)"},
+		{"misspelled timeout", "first_byte: 5s", "firstbyte: 5s", "", "field firstbyte not found"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -189,8 +196,11 @@ models:
 		`upstreams[0]: base_url "127.0.0.1:8081" is not an http:// or https:// URL`,
 		"upstreams[0]: max_concurrent must be at least 1, got 0",
 		`models.chat: upstream "c" is not defined`,
+		"models.chat: timeouts is missing",
 		`models.embed: upstream "d" is not defined`,
+		"models.embed: timeouts is missing",
 		`models.extract: upstream "b" is not defined`,
+		"models.extract: timeouts is missing",
 	}, "\n")
 	for range 20 {
 		if _, err := LoadConfig(path); err == nil || err.Error() != want {

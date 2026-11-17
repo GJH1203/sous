@@ -10,7 +10,6 @@ import (
 	"os"
 	"os/signal"
 	"syscall"
-	"time"
 
 	"github.com/GJH1203/sous/gateway"
 )
@@ -28,9 +27,7 @@ func main() {
 	}
 
 	logger := slog.New(slog.NewJSONHandler(os.Stderr, nil))
-	// A non-streaming reply's headers come only once the whole reply is
-	// generated, so this is really a limit on generation time.
-	client := gateway.NewClient(120 * time.Second)
+	client := gateway.NewClient()
 	proxy := gateway.NewProxy(client, cfg, logger)
 	srv := gateway.NewServer(cfg, gateway.NewHandler(cfg, proxy, logger), logger)
 

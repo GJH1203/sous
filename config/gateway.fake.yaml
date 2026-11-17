@@ -13,10 +13,21 @@ upstreams:
     base_url: http://127.0.0.1:9002
     max_concurrent: 4
 
+# The same timeouts as the real models, so that a slow fake (-delay,
+# -prompt-delay, -chunk-interval) runs into them as a slow model would.
 models:
-  extract: {upstream: fake-b, model: fake-extract}
-  chat: {upstream: fake-b, model: fake-chat}
-  embed: {upstream: fake-a, model: fake-embed}
+  extract:
+    upstream: fake-b
+    model: fake-extract
+    timeouts: {connect: 3s, first_byte: 8s, idle: 10s, total: 30s}
+  chat:
+    upstream: fake-b
+    model: fake-chat
+    timeouts: {connect: 3s, first_byte: 60s, idle: 15s, total: 180s}
+  embed:
+    upstream: fake-a
+    model: fake-embed
+    timeouts: {connect: 3s, first_byte: 5s, idle: 5s, total: 15s}
 
 callers:
   - name: app

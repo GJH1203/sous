@@ -66,7 +66,7 @@ func TestStreamEventsArriveAtOnce(t *testing.T) {
 		io.WriteString(w, "data: [DONE]\n\n")
 	}))
 	defer upstream.Close()
-	gw, client := startGateway(t, upstream.URL, "", 5*time.Second)
+	gw, client := startGateway(t, upstream.URL, "")
 	defer gw.Close()
 	defer client.CloseIdleConnections()
 
@@ -128,7 +128,7 @@ func TestStreamDropsCutOffEvent(t *testing.T) {
 		panic(http.ErrAbortHandler)
 	}))
 	defer upstream.Close()
-	gw, client := startGateway(t, upstream.URL, "", 5*time.Second)
+	gw, client := startGateway(t, upstream.URL, "")
 	defer gw.Close()
 	defer client.CloseIdleConnections()
 

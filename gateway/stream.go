@@ -3,9 +3,11 @@ package gateway
 import (
 	"bufio"
 	"bytes"
+	"context"
 	"io"
 	"mime"
 	"net/http"
+	"time"
 )
 
 // isEventStream reports whether a response is a stream of server-sent events.
@@ -17,12 +19,19 @@ func isEventStream(h http.Header) bool {
 }
 
 // stream relays an event stream one whole event at a time and flushes after
-// each, so the caller gets every event as soon as the upstream sends it.
-func (p *Proxy) stream(w http.ResponseWriter, r *http.Request, body io.Reader) {
+// each, so the caller gets every event as soon as the upstream sends it. If
+// the upstream sends nothing for idle, stop cancels ctx, the request's
+// context, which ends the stream.
+func (p *Proxy) stream(ctx context.Context, w http.ResponseWriter, r *http.Request, body io.Reader, idle time.Duration, stop context.CancelCauseFunc) {
 	rc := http.NewResponseController(w)
+	// Restarted at every event: a stream may run as long as the deadline
+	// allows, but not fall silent for longer than idle.
+	timer := time.AfterFunc(idle, func() { stop(idleTimeout) })
+	defer timer.Stop()
 	events := bufio.NewScanner(body)
 	events.Split(splitEvents)
 	for events.Scan() {
+		timer.Reset(idle)
 		if _, err := w.Write(events.Bytes()); err != nil {
 			return // the caller is gone; returning cancels the upstream request
 		}
@@ -37,7 +46,12 @@ func (p *Proxy) stream(w http.ResponseWriter, r *http.Request, body io.Reader) {
 		// The status went out before the first event, so it cannot report
 		// this failure any more. An error event is all that is left.
 		p.log.Warn("upstream stream broke off", "request_id", requestIDFrom(r.Context()), "err", err)
-		writeStreamError(w, "upstream_error", "the upstream stream ended early")
+		code, message := "upstream_error", "the upstream stream ended early"
+		if t, ok := timeoutOf(ctx, err); ok {
+			infoFrom(r.Context()).timeout = string(t)
+			code, message = t.code(), "the upstream took too long: the "+t.Error()+" ran out"
+		}
+		writeStreamError(w, code, message)
 		rc.Flush()
 	}
 }

@@ -37,10 +37,10 @@ func twoUpstreams(t *testing.T) (a, b *fakeupstream.Server, gatewayURL string) {
 			{Name: "b", BaseURL: bURL, APIKey: "b-key", MaxConcurrent: 100, QueueTimeout: 10 * time.Second},
 		},
 		Models: map[string]ModelRoute{
-			"embed": {Upstream: "a", Model: "a-embedder"},
-			"chat":  {Upstream: "b", Model: "b-chat"},
+			"embed": {Upstream: "a", Model: "a-embedder", Timeouts: roomy},
+			"chat":  {Upstream: "b", Model: "b-chat", Timeouts: roomy},
 		},
-	}, 5*time.Second)
+	})
 	t.Cleanup(func() {
 		gw.Close()
 		client.CloseIdleConnections()

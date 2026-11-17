@@ -25,10 +25,25 @@ upstreams:
 
 # Callers use only these logical names; the gateway swaps in the upstream's
 # own name for the model. llama-server ignores it, a cloud upstream does not.
+#
+# Each model has four timeouts: connecting, the first byte of the body, the
+# longest gap in a stream, and the whole request. They are guesses well above
+# what each model normally takes; docs/design/stage-2.md has the reasoning.
 models:
-  extract: {upstream: local-extract, model: qwen3.5-4b}
-  chat: {upstream: local-chat, model: qwen3.5-9b}
-  embed: {upstream: local-embed, model: qwen3-embedding-0.6b}
+  extract:
+    upstream: local-extract
+    model: qwen3.5-4b
+    timeouts: {connect: 3s, first_byte: 8s, idle: 10s, total: 30s}
+  chat:
+    upstream: local-chat
+    model: qwen3.5-9b
+    # The first byte of a reply that is not streamed comes when the whole
+    # reply is done: thinking takes most of a minute.
+    timeouts: {connect: 3s, first_byte: 60s, idle: 15s, total: 180s}
+  embed:
+    upstream: local-embed
+    model: qwen3-embedding-0.6b
+    timeouts: {connect: 3s, first_byte: 5s, idle: 5s, total: 15s}
 
 # A caller may send burst requests at once, then per_second on average. The
 # limit is there to stop a runaway loop: logging a dish takes one or two

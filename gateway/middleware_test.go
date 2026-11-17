@@ -13,7 +13,6 @@ import (
 	"sync"
 	"sync/atomic"
 	"testing"
-	"time"
 )
 
 // lockedBuffer collects what the gateway logs from its own goroutines.
@@ -174,7 +173,7 @@ func TestRequestIDGoesUpstreamAndBack(t *testing.T) {
 		io.WriteString(w, `{}`)
 	}))
 	defer upstream.Close()
-	gw, client := startGateway(t, upstream.URL, "", 5*time.Second)
+	gw, client := startGateway(t, upstream.URL, "")
 	defer gw.Close()
 	defer client.CloseIdleConnections()
 	resp, _ = post(t, gw.URL+"/v1/embeddings", nil, embedBody)

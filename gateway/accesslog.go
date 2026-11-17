@@ -16,6 +16,7 @@ type requestInfo struct {
 	model    string // the logical name the caller asked for
 	upstream string
 	stream   bool
+	timeout  string // which timeout ended the request, if one did
 }
 
 // infoFrom returns the request's requestInfo. Without the access log there
@@ -84,6 +85,7 @@ func withAccessLog(next http.Handler, log *slog.Logger) http.Handler {
 			"upstream", info.upstream,
 			"stream", info.stream,
 			"status", status,
+			"timeout", info.timeout,
 			"first_byte_ms", rec.firstByte.Milliseconds(),
 			"total_ms", time.Since(rec.start).Milliseconds(),
 		)

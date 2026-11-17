@@ -50,8 +50,26 @@ const defaultQueueTimeout = 10 * time.Second
 
 // ModelRoute says which upstream serves a logical model, and under what name.
 type ModelRoute struct {
-	Upstream string `yaml:"upstream"`
-	Model    string `yaml:"model"`
+	Upstream string   `yaml:"upstream"`
+	Model    string   `yaml:"model"`
+	Timeouts Timeouts `yaml:"timeouts"`
+}
+
+// Timeouts are the four ways a model can be too slow, each with a limit of its
+// own. They are set per model, since models differ by orders of magnitude: an
+// embedding takes milliseconds, a chat answer with thinking most of a minute.
+type Timeouts struct {
+	// Connect is for the TCP connection to the upstream.
+	Connect time.Duration `yaml:"connect"`
+	// FirstByte runs from sending the request to the first byte of the
+	// response body. Not the headers: a stream gets those as soon as it has a
+	// slot in the engine, before the model has read the prompt.
+	FirstByte time.Duration `yaml:"first_byte"`
+	// Idle is the longest a stream may go without an event.
+	Idle time.Duration `yaml:"idle"`
+	// Total is the whole request, from when it arrives: the queue, the
+	// upstream, and the whole stream.
+	Total time.Duration `yaml:"total"`
 }
 
 // Caller is a client of the gateway, such as the cooking app.
@@ -168,6 +186,26 @@ func (c *Config) check() error {
 		}
 		if m.Model == "" {
 			problem("%s: model is missing", where)
+		}
+		// No defaults: no one value suits a model that answers in
+		// milliseconds and one that thinks for a minute.
+		t := m.Timeouts
+		if t == (Timeouts{}) {
+			problem("%s: timeouts is missing", where)
+			continue
+		}
+		for _, f := range []struct {
+			name string
+			d    time.Duration
+		}{{"connect", t.Connect}, {"first_byte", t.FirstByte}, {"idle", t.Idle}, {"total", t.Total}} {
+			if f.d <= 0 {
+				problem("%s: timeouts.%s must be more than 0, got %v", where, f.name, f.d)
+			}
+		}
+		// Otherwise the total timeout always comes first, and a slow first
+		// byte is reported as the wrong kind of timeout.
+		if t.FirstByte > t.Total {
+			problem("%s: timeouts.first_byte (%v) is longer than timeouts.total (%v)", where, t.FirstByte, t.Total)
 		}
 	}
 

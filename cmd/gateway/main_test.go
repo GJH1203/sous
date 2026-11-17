@@ -65,7 +65,7 @@ upstreams:
     base_url: %s
     max_concurrent: 4
 models:
-  chat: {upstream: fake, model: chat}
+  chat: {upstream: fake, model: chat, timeouts: {connect: 3s, first_byte: 30s, idle: 30s, total: 60s}}
 callers:
   - name: test
     api_key_env: TEST_GATEWAY_KEY

@@ -233,6 +233,12 @@ func TestCallerLeavesTheQueueAtOnce(t *testing.T) {
 	if total := ms(line, "total_ms"); total > 1000 {
 		t.Errorf("the gateway let the request go after %v ms", total)
 	}
+	// A caller leaving is not the upstream failing.
+	for _, l := range r.logs.lines(t) {
+		if l["level"] == "WARN" {
+			t.Errorf("logged %v", l)
+		}
+	}
 	if n := r.fake.Stats().Requests; n != 1 {
 		t.Errorf("the upstream got %d requests, want only the one holding the slot", n)
 	}

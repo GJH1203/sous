@@ -45,8 +45,8 @@ func New(token string, allowed []string, handle Handler, log *slog.Logger) *Bot 
 		allowed: make(map[string]bool),
 		handle:  handle,
 		log:     log,
-		// Long enough for a couple of model calls, which the gateway limits
-		// to 120 s each.
+		// Longer than the llm client's deadline for one answer, so that a
+		// slow model ends with the gateway's error rather than this one.
 		timeout: 5 * time.Minute,
 	}
 	for _, id := range allowed {

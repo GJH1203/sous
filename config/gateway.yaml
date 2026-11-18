@@ -27,8 +27,9 @@ upstreams:
 # own name for the model. llama-server ignores it, a cloud upstream does not.
 #
 # Each model has four timeouts: connecting, the first byte of the body, the
-# longest gap in a stream, and the whole request. They are guesses well above
-# what each model normally takes; docs/design/stage-2.md has the reasoning.
+# longest gap in a stream, and the whole request. They are well above what
+# each model normally takes, so that only one that is stuck, or far slower
+# than usual, runs into them.
 models:
   extract:
     upstream: local-extract

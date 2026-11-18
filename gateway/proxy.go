@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"math/rand/v2"
 	"net"
 	"net/http"
 	"strconv"
@@ -54,6 +55,9 @@ type Proxy struct {
 	// NewProxy, so concurrent requests can read it without a lock.
 	routes map[string]route
 	log    *slog.Logger
+	// random returns a number in [0, 1) for the backoff. A field, so that a
+	// test can make the waits exact.
+	random func() float64
 }
 
 // route is where the requests for one logical model go.
@@ -62,9 +66,10 @@ type route struct {
 	baseURL  string
 	apiKey   string // the gateway's own key for the upstream; empty for none
 	model    string // the upstream's name for the model
-	// slots belongs to the upstream, not the model: every model the
-	// upstream serves shares it.
+	// slots and budget belong to the upstream, not the model: every model
+	// the upstream serves shares them.
 	slots        slots
+	budget       *retryBudget
 	queueTimeout time.Duration
 	timeouts     Timeouts
 }
@@ -74,17 +79,19 @@ type route struct {
 func NewProxy(client *http.Client, cfg *Config, log *slog.Logger) *Proxy {
 	upstreams := make(map[string]Upstream)
 	slotsOf := make(map[string]slots)
+	budgetOf := make(map[string]*retryBudget)
 	for _, u := range cfg.Upstreams {
 		upstreams[u.Name] = u
 		slotsOf[u.Name] = make(slots, u.MaxConcurrent)
+		budgetOf[u.Name] = &retryBudget{}
 	}
 	routes := make(map[string]route)
 	for name, m := range cfg.Models {
 		u := upstreams[m.Upstream]
 		routes[name] = route{upstream: u.Name, baseURL: u.BaseURL, apiKey: u.APIKey, model: m.Model,
-			slots: slotsOf[u.Name], queueTimeout: u.QueueTimeout, timeouts: m.Timeouts}
+			slots: slotsOf[u.Name], budget: budgetOf[u.Name], queueTimeout: u.QueueTimeout, timeouts: m.Timeouts}
 	}
-	return &Proxy{client: client, routes: routes, log: log}
+	return &Proxy{client: client, routes: routes, log: log, random: rand.Float64}
 }
 
 func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -132,15 +139,14 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	// Built on the inbound request's context: when the caller goes away, the
 	// upstream request is cancelled with it, and the model stops generating.
-	// The deadline is set once and never moved, so the queue, the upstream
-	// and the whole stream all count against it.
+	// The deadline is set once and never moved, so the queue, every attempt,
+	// the waits between them and the whole stream all count against it.
 	ctx, cancel := context.WithDeadlineCause(r.Context(), due, totalTimeout)
 	defer cancel()
-	// The first-byte and idle timers cancel this, each with its own cause.
-	ctx, stop := context.WithCancelCause(ctx)
-	defer stop(nil)
 	ctx = context.WithValue(ctx, connectKey{}, rt.timeouts.Connect)
 
+	// Each attempt sends a copy of this. The body is a bytes.Reader, so the
+	// request can make a new one for every copy.
 	req, err := http.NewRequestWithContext(ctx, r.Method, rt.baseURL+r.URL.Path, bytes.NewReader(body))
 	if err != nil {
 		p.log.Error("building the upstream request", "request_id", requestIDFrom(r.Context()), "err", err)
@@ -151,64 +157,159 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if rt.apiKey != "" {
 		req.Header.Set("Authorization", "Bearer "+rt.apiKey)
 	}
-	id := requestIDFrom(r.Context())
-	if id != "" {
+	if id := requestIDFrom(r.Context()); id != "" {
 		// So that the upstream's log lines can be matched with the gateway's.
 		req.Header.Set("X-Request-ID", id)
 	}
 
+	for n := 1; ; n++ {
+		info.attempts = n
+		wait, again := p.attempt(ctx, w, r, rt, req, due, n)
+		if !again {
+			return
+		}
+		select {
+		case <-time.After(wait):
+		case <-ctx.Done():
+			p.fail(ctx, w, r, context.Cause(ctx)) // the caller left, or the deadline came
+			return
+		}
+	}
+}
+
+// attempt makes attempt n at the upstream, and answers the caller, unless it
+// failed in a way that another attempt might not. Then it answers no one, and
+// returns how long to wait before the next attempt, and true.
+func (p *Proxy) attempt(ctx context.Context, w http.ResponseWriter, r *http.Request, rt route, req *http.Request, due time.Time, n int) (time.Duration, bool) {
 	if err := rt.slots.acquire(ctx, rt.queueTimeout); err != nil {
 		if errors.Is(err, errNoSlot) {
 			writeError(w, http.StatusServiceUnavailable, "upstream_busy",
 				fmt.Sprintf("the upstream is busy, and no slot came free within %v", rt.queueTimeout))
-			return
+			return 0, false
 		}
 		p.fail(ctx, w, r, err) // the caller left, or the deadline came
-		return
+		return 0, false
 	}
 	// Deferred, so the slot is held until the whole answer is relayed: a
-	// stream keeps its slot in the engine until its last token.
+	// stream keeps its slot in the engine until its last token. A failed
+	// attempt gives it back before the wait.
 	defer rt.slots.release()
+	if n == 1 {
+		rt.budget.first(time.Now())
+	}
 
-	// The time left after queueing, rounded up, so that a server that reads
-	// it can drop work no one will wait for.
+	// The attempt's own context: the first-byte and idle timers end the
+	// attempt, each with its own cause, and the request may go on.
+	actx, stop := context.WithCancelCause(ctx)
+	defer stop(nil)
+	resp, first, err := p.send(actx, stop, req, rt.timeouts.FirstByte, due)
+	if resp != nil {
+		// net/http asks for every body to be closed. Cancelling the
+		// attempt's context, deferred above, would free the connection too,
+		// but only as a side effect.
+		defer resp.Body.Close()
+	}
+
+	var reason string
+	var after time.Duration // the least wait the upstream asks for
+	switch {
+	case err == nil && !retryable(resp.StatusCode):
+		p.relay(actx, stop, w, r, resp, first, rt.timeouts.Idle)
+		return 0, false
+	case err == nil:
+		reason = resp.Status
+		after = retryAfter(resp.Header, time.Now())
+	case ctx.Err() != nil:
+		p.fail(actx, w, r, err) // the caller left, or the deadline came
+		return 0, false
+	default:
+		reason = err.Error()
+		if t, ok := timeoutOf(actx, err); ok {
+			reason = t.Error()
+		}
+	}
+
+	wait := max(backoff(n, p.random()), after)
+	var why string
+	switch {
+	case n == maxAttempts:
+		why = "no attempts left"
+	case time.Now().Add(wait).After(due):
+		why = "the wait would end past the deadline"
+	// Last, since it takes from the budget.
+	case !rt.budget.spend(time.Now()):
+		why = "over the upstream's retry budget"
+	}
+	if why == "" {
+		p.log.Warn("upstream attempt failed", "request_id", requestIDFrom(r.Context()), "attempt", n,
+			"upstream", rt.upstream, "reason", reason, "next", "retry in "+wait.String())
+		return wait, true
+	}
+	p.log.Warn("upstream attempt failed", "request_id", requestIDFrom(r.Context()), "attempt", n,
+		"upstream", rt.upstream, "reason", reason, "next", "none: "+why)
+	// The last failure goes to the caller as it is.
+	if err == nil {
+		p.relay(actx, stop, w, r, resp, first, rt.timeouts.Idle)
+	} else {
+		p.fail(actx, w, r, err)
+	}
+	return 0, false
+}
+
+// send makes one attempt: it sends a copy of req, with ctx, and waits for the
+// first byte of the answer's body. ctx is the attempt's own, and stop cancels
+// it. The answer comes back with its first bytes read into first.
+func (p *Proxy) send(ctx context.Context, stop context.CancelCauseFunc, req *http.Request, firstByte time.Duration, due time.Time) (*http.Response, *bufio.Reader, error) {
+	// Clone copies the headers but shares the body, which the attempt before
+	// has read to its end. GetBody makes a new one from the same bytes.
+	req = req.Clone(ctx)
+	req.Body, _ = req.GetBody() // cannot fail on a bytes.Reader
+	// The time left, rounded up, so that a server that reads it can drop
+	// work no one will wait for.
 	left := (time.Until(due) + time.Millisecond - 1) / time.Millisecond
 	req.Header.Set("X-Timeout-Ms", strconv.FormatInt(int64(left), 10))
 
 	// Started before the request is sent, so it covers connecting too.
-	timer := time.AfterFunc(rt.timeouts.FirstByte, func() { stop(firstByteTimeout) })
+	timer := time.AfterFunc(firstByte, func() { stop(firstByteTimeout) })
 	defer timer.Stop()
 	resp, err := p.client.Do(req)
 	if err != nil {
-		p.fail(ctx, w, r, err)
-		return
+		return nil, nil, err
 	}
-	// A body that is neither read to the end nor closed keeps its connection
-	// out of the pool for good.
-	defer resp.Body.Close()
-
 	// Wait for the first byte of the body before answering: until something
-	// has been written, a timeout can still be a plain 504. Peek reads it
-	// without taking it out of the body.
+	// has been written, the request can still be retried, or end in a plain
+	// 504. Peek reads it without taking it out of the body.
 	first := bufio.NewReader(resp.Body)
 	_, err = first.Peek(1)
 	timer.Stop()
-	// An empty body ends with EOF at once, and that is an answer too. The
-	// timer may have fired just as the byte came, so ctx is checked as well.
-	if (err != nil && err != io.EOF) || ctx.Err() != nil {
-		p.fail(ctx, w, r, err)
-		return
+	if err == io.EOF {
+		err = nil // an empty body is an answer too
 	}
+	if err == nil {
+		// Nil, unless the timer fired just as the byte came.
+		err = context.Cause(ctx)
+	}
+	if err != nil {
+		resp.Body.Close()
+		return nil, nil, err
+	}
+	return resp, first, nil
+}
 
+// relay copies an answer to the caller. Once it has written anything, the
+// request cannot be retried: the caller would get a second answer spliced
+// onto the first.
+func (p *Proxy) relay(ctx context.Context, stop context.CancelCauseFunc, w http.ResponseWriter, r *http.Request, resp *http.Response, first *bufio.Reader, idle time.Duration) {
 	copyResponseHeader(w.Header(), resp.Header)
-	if id != "" {
+	if id := requestIDFrom(r.Context()); id != "" {
 		// An upstream may send an ID of its own; the caller gets only ours.
 		w.Header().Set("X-Request-ID", id)
 	}
 	w.WriteHeader(resp.StatusCode)
+	info := infoFrom(r.Context())
 	if isEventStream(resp.Header) {
 		info.stream = true
-		p.stream(ctx, w, r, first, rt.timeouts.Idle, stop)
+		p.stream(ctx, w, r, first, idle, stop)
 		return
 	}
 	if _, err := io.Copy(w, first); err != nil {
@@ -231,8 +332,7 @@ func (p *Proxy) fail(ctx context.Context, w http.ResponseWriter, r *http.Request
 		writeError(w, http.StatusGatewayTimeout, t.code(), "the upstream took too long: the "+t.Error()+" ran out")
 		return
 	}
-	// The error contains the upstream's address, so it goes to the log, not
-	// to the caller.
-	p.log.Warn("upstream request failed", "request_id", requestIDFrom(r.Context()), "err", err)
+	// The error contains the upstream's address, so it goes only to the log,
+	// in the attempt's line.
 	writeError(w, http.StatusBadGateway, "upstream_error", "the upstream could not be reached")
 }

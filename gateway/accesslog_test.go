@@ -54,7 +54,7 @@ func TestAccessLogLine(t *testing.T) {
 	line := accessLine(t, r.logs, withID(resp.Header.Get("X-Request-ID")))
 	check(t, line, map[string]any{
 		"caller": "test", "feature": "search", "path": "/v1/embeddings",
-		"model": "embed", "upstream": "fake", "stream": false, "status": 200.0,
+		"model": "embed", "upstream": "fake", "stream": false, "status": 200.0, "attempts": 1.0,
 	})
 	// The upstream holds its headers back for 50 ms.
 	if first, total := ms(line, "first_byte_ms"), ms(line, "total_ms"); first < 50 || total < first {

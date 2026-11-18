@@ -134,6 +134,9 @@ func TestModelsOnOneUpstreamShareItsSlots(t *testing.T) {
 	if chat != embed {
 		t.Error("chat and embed have separate slots on the same upstream")
 	}
+	if p.routes["chat"].budget != p.routes["embed"].budget {
+		t.Error("chat and embed have separate retry budgets on the same upstream")
+	}
 	if cap(chat) != 100 {
 		t.Errorf("%d slots, want the upstream's max_concurrent, 100", cap(chat))
 	}

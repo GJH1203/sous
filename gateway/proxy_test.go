@@ -39,6 +39,8 @@ type options struct {
 	timeouts Timeouts
 	// dial, if set, stands in for the network.
 	dial dialFunc
+	// random, if set, stands in for the backoff's random numbers.
+	random func() float64
 }
 
 func setup(t *testing.T, o options) rig {
@@ -72,7 +74,7 @@ func setup(t *testing.T, o options) rig {
 	if o.dial != nil {
 		client = newClient(o.dial)
 	}
-	gw, logs := startGatewayLogged(t, gwCfg, client)
+	gw, logs := startGatewayLogged(t, gwCfg, client, o.random)
 	t.Cleanup(func() {
 		fake.Close() // first: both servers' Close wait for requests it holds
 		gw.Close()
@@ -106,7 +108,7 @@ func startGateway(t *testing.T, upstream, apiKey string) (*httptest.Server, *htt
 func startGatewayWith(t *testing.T, cfg *Config) (*httptest.Server, *http.Client) {
 	t.Helper()
 	client := NewClient()
-	gw, _ := startGatewayLogged(t, cfg, client)
+	gw, _ := startGatewayLogged(t, cfg, client, nil)
 	return gw, client
 }
 
@@ -115,13 +117,18 @@ const testKey = "test-caller-key"
 
 // startGatewayLogged starts the whole gateway, middleware included, with
 // cfg's callers replaced by the test caller. Its JSON log goes to the test's
-// output, and to the buffer it returns. client is how it reaches upstreams.
-func startGatewayLogged(t *testing.T, cfg *Config, client *http.Client) (*httptest.Server, *lockedBuffer) {
+// output, and to the buffer it returns. client is how it reaches upstreams;
+// random, if not nil, replaces the backoff's random numbers.
+func startGatewayLogged(t *testing.T, cfg *Config, client *http.Client, random func() float64) (*httptest.Server, *lockedBuffer) {
 	t.Helper()
 	cfg.Callers = []Caller{{Name: "test", APIKey: testKey, RateLimit: generous}}
 	logs := &lockedBuffer{}
 	logger := slog.New(slog.NewJSONHandler(io.MultiWriter(t.Output(), logs), nil))
-	return httptest.NewServer(NewHandler(cfg, NewProxy(client, cfg, logger), logger)), logs
+	p := NewProxy(client, cfg, logger)
+	if random != nil {
+		p.random = random
+	}
+	return httptest.NewServer(NewHandler(cfg, p, logger)), logs
 }
 
 // newRequest is a JSON POST with the test caller's key.
@@ -255,15 +262,19 @@ func TestUpstreamErrorPassesThrough(t *testing.T) {
 	r := setup(t, options{fake: func(c *fakeupstream.Config) {
 		c.FailRate = 1
 		c.FailStatus = 429
-		c.RetryAfter = 2
+		// Past the deadline, so the gateway does not try again.
+		c.RetryAfter = 60
 	}})
 	direct, directBody := post(t, r.fakeURL+"/v1/embeddings", nil, embedBody)
 	via, viaBody := post(t, r.gatewayURL+"/v1/embeddings", nil, embedBody)
 	if via.StatusCode != 429 || string(viaBody) != string(directBody) {
 		t.Errorf("via the gateway: %d %s\ndirect: %d %s", via.StatusCode, viaBody, direct.StatusCode, directBody)
 	}
-	if ra := via.Header.Get("Retry-After"); ra != "2" {
-		t.Errorf("Retry-After = %q, want 2", ra)
+	if ra := via.Header.Get("Retry-After"); ra != "60" {
+		t.Errorf("Retry-After = %q, want 60", ra)
+	}
+	if n := r.fake.Stats().Requests; n != 2 {
+		t.Errorf("the upstream got %d requests, want 2: one direct, one through the gateway", n)
 	}
 }
 
@@ -324,6 +335,14 @@ func TestCallerLeavingCancelsUpstream(t *testing.T) {
 	}
 	// Far sooner than the 5 s the upstream would otherwise have spent.
 	waitFor(t, time.Second, "the upstream request to be cancelled", func() bool { return r.fake.Stats().Concurrent == 0 })
+	// A caller leaving is not the upstream failing: not retried, nor logged as
+	// a failed attempt.
+	if lines := attemptLines(t, r.logs); len(lines) != 0 {
+		t.Errorf("logged %v", lines)
+	}
+	if n := r.fake.Stats().Requests; n != 1 {
+		t.Errorf("the upstream got %d requests, want 1", n)
+	}
 }
 
 func TestConnectionsAreReused(t *testing.T) {

@@ -72,8 +72,9 @@ func socketDeadline(ctx context.Context, network, addr string) (net.Conn, error)
 }
 
 // gave504 checks that a request was answered with 504 and the timeout's
-// code, after about after, and that the access log names the timeout.
-func gave504(t *testing.T, r rig, body string, header http.Header, code string, after time.Duration) {
+// code, after about after, and that the access log names the timeout and
+// counts the attempts.
+func gave504(t *testing.T, r rig, body string, header http.Header, code string, after time.Duration, attempts int) {
 	t.Helper()
 	began := time.Now()
 	resp, b := post(t, r.gatewayURL+"/v1/chat/completions", header, body)
@@ -85,9 +86,7 @@ func gave504(t *testing.T, r rig, body string, header http.Header, code string, 
 		t.Errorf("answered after %v, want about %v", took, after)
 	}
 	line := accessLine(t, r.logs, func(l map[string]any) bool { return l["status"] == 504.0 })
-	if want := strings.TrimSuffix(code, "_timeout"); line["timeout"] != want {
-		t.Errorf("access log timeout = %v, want %s", line["timeout"], want)
-	}
+	check(t, line, map[string]any{"timeout": strings.TrimSuffix(code, "_timeout"), "attempts": float64(attempts)})
 }
 
 func TestConnectTimeout(t *testing.T) {
@@ -96,8 +95,10 @@ func TestConnectTimeout(t *testing.T) {
 			r := setup(t, options{
 				timeouts: Timeouts{Connect: 100 * time.Millisecond, FirstByte: 2 * time.Second, Idle: time.Second, Total: 5 * time.Second},
 				dial:     dial,
+				random:   noJitter,
 			})
-			gave504(t, r, chatBody, nil, "connect_timeout", 90*time.Millisecond)
+			// Three attempts, with no wait between them.
+			gave504(t, r, chatBody, nil, "connect_timeout", 3*90*time.Millisecond, 3)
 			if n := r.fake.Stats().Requests; n != 0 {
 				t.Errorf("the upstream got %d requests through a network that is down", n)
 			}
@@ -122,8 +123,12 @@ func TestFirstByteTimeout(t *testing.T) {
 			r := setup(t, options{
 				timeouts: Timeouts{Connect: time.Second, FirstByte: 200 * time.Millisecond, Idle: time.Second, Total: 5 * time.Second},
 				fake:     tt.fake,
+				random:   noJitter,
 			})
-			gave504(t, r, tt.body, nil, "first_byte_timeout", 200*time.Millisecond)
+			gave504(t, r, tt.body, nil, "first_byte_timeout", 3*200*time.Millisecond, 3)
+			if n := r.fake.Stats().Requests; n != 3 {
+				t.Errorf("the upstream got %d requests, want 3", n)
+			}
 			// Giving up also ends the upstream request.
 			waitFor(t, time.Second, "the upstream request to end", func() bool { return r.fake.Stats().Concurrent == 0 })
 		})
@@ -136,7 +141,7 @@ func TestFirstByteTimeout(t *testing.T) {
 func TestTotalTimeoutWhileQueued(t *testing.T) {
 	r := setup(t, options{maxConcurrent: 1, fake: slowFake})
 	holdSlot(t, r)
-	gave504(t, r, chatBody, http.Header{"X-Timeout-Ms": {"200"}}, "total_timeout", 200*time.Millisecond)
+	gave504(t, r, chatBody, http.Header{"X-Timeout-Ms": {"200"}}, "total_timeout", 200*time.Millisecond, 1)
 	if n := r.fake.Stats().Requests; n != 1 {
 		t.Errorf("the upstream got %d requests, want only the one holding the slot", n)
 	}
